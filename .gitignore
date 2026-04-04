@@ -21,6 +21,9 @@ env/
 tokens/
 auths/
 
+# Accounts
+accounts.txt
+
 # OS
 .DS_Store
 Thumbs.db

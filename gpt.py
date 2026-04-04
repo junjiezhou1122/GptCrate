@@ -54,7 +54,7 @@ _load_dotenv()
 MAIL_DOMAIN =os.getenv("MAIL_DOMAIN", "")
 MAIL_WORKER_BASE = os.getenv("MAIL_WORKER_BASE", "").rstrip("/")
 MAIL_ADMIN_PASSWORD = os.getenv("MAIL_ADMIN_PASSWORD", "")
-TOKEN_OUTPUT_DIR = os.getenv("TOKEN_OUTPUT_DIR", "").strip()
+TOKEN_OUTPUT_DIR = os.getenv("TOKEN_OUTPUT_DIR", "tokens").strip()
 CLI_PROXY_AUTHS_DIR = os.getenv("CLI_PROXY_AUTHS_DIR", "").strip()
 
 PROXY_FILE = os.getenv("PROXY_FILE", "").strip()
