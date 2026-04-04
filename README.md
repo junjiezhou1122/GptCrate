@@ -1,6 +1,6 @@
 # OpenAI 自动注册工具
 
-自动批量注册 OpenAI 账号，支持多代理轮换、多线程并发。
+自动批量注册 OpenAI 账号，支持多代理轮换、多线程并发，并支持接入自建 OpenTrashmail 临时邮箱服务。
 
 ---
 
@@ -60,13 +60,14 @@ pip install curl_cffi
 
 ### 邮箱模式
 
-支持三种邮箱来源，通过 `EMAIL_MODE` 切换：
+支持四种邮箱来源，通过 `EMAIL_MODE` 切换：
 
 | 模式              | 值           | 说明                                                                                        |
 | ----------------- | ------------ | ------------------------------------------------------------------------------------------- |
 | Cloudflare Worker | `cf`         | 使用自有域名随机生成邮箱，需配置 `MAIL_DOMAIN` / `MAIL_WORKER_BASE` / `MAIL_ADMIN_PASSWORD` |
 | Hotmail007 API    | `hotmail007` | 通过 API 拉取微软邮箱，需配置 `HOTMAIL007_API_KEY`                                          |
 | LuckMail API      | `luckmail`   | 通过接码平台自动获取邮箱，需配置 `LUCKMAIL_API_KEY`                                         |
+| OpenTrashmail     | `opentrashmail` | 通过自建 OpenTrashmail 的 JSON API 收验证码，需配置 `OPENTRASHMAIL_BASE_URL` / `OPENTRASHMAIL_DOMAIN` |
 
 **Cloudflare 模式配置：**
 
@@ -98,6 +99,22 @@ LUCKMAIL_API_KEY=你的API密钥
 ```
 
 LuckMail 模式会自动创建接码订单，每次注册都会分配一个新的 outlook 邮箱用于接收验证码。
+
+**OpenTrashmail 模式配置：**
+
+```env
+EMAIL_MODE=opentrashmail
+OPENTRASHMAIL_BASE_URL=https://mail.example.com
+OPENTRASHMAIL_DOMAIN=mail.example.com
+OPENTRASHMAIL_PASSWORD=
+OPENTRASHMAIL_POLL_TIMEOUT=120
+OPENTRASHMAIL_POLL_INTERVAL=3
+```
+
+- `OPENTRASHMAIL_BASE_URL` 填你的 OpenTrashmail 站点地址，不要带末尾 `/`
+- `OPENTRASHMAIL_DOMAIN` 填 OpenTrashmail 接收邮件的域名；如配置了多个域名，可用逗号分隔
+- `OPENTRASHMAIL_PASSWORD` 只有在 OpenTrashmail 配置了 `PASSWORD` 时才需要填写；程序会通过 `PWD` 请求头访问 API
+- 程序会自动随机生成邮箱地址，并轮询 `/json/[email]` / `/json/[email]/[id]` 获取 OpenAI 验证码
 
 ### 代理配置
 
@@ -164,11 +181,14 @@ python gpt.py [参数]
 | `--check`                | -                    | 先检测已有 token 状态，不足阈值时自动补注册 |
 | `--sleep-min`            | 5                    | 每次注册间隔最短秒数                        |
 | `--sleep-max`            | 30                   | 每次注册间隔最长秒数                        |
-| `--email-mode`           | 读 .env              | 邮箱模式: `cf` / `hotmail007` / `luckmail`  |
+| `--email-mode`           | 读 .env              | 邮箱模式: `cf` / `hotmail007` / `luckmail` / `opentrashmail`  |
 | `--hotmail007-key`       | 读 .env              | 覆盖 .env 中的 Hotmail007 API Key           |
 | `--hotmail007-type`      | 读 .env              | 覆盖 .env 中的邮箱类型                      |
 | `--hotmail007-mail-mode` | 读 .env              | 收信模式: `graph` / `imap`                  |
 | `--luckmail-key`         | 读 .env              | 覆盖 .env 中的 LuckMail API Key             |
+| `--opentrashmail-url`    | 读 .env              | 覆盖 .env 中的 OpenTrashmail 服务地址       |
+| `--opentrashmail-domain` | 读 .env              | 覆盖 .env 中的 OpenTrashmail 邮箱域名       |
+| `--opentrashmail-password` | 读 .env            | 覆盖 .env 中的 OpenTrashmail API 密码       |
 
 ---
 
@@ -231,6 +251,25 @@ python gpt.py --proxy-file proxies.txt --threads 2
 ```
 
 不指定 `--count` 时为无限循环模式，按 `Ctrl+C` 停止。
+
+### 9. 使用 OpenTrashmail 自建邮箱
+
+```bash
+python gpt.py --email-mode opentrashmail \
+  --opentrashmail-url https://mail.example.com \
+  --opentrashmail-domain mail.example.com \
+  --once
+```
+
+如果你的 OpenTrashmail 开启了 `PASSWORD`，再额外加上：
+
+```bash
+python gpt.py --email-mode opentrashmail \
+  --opentrashmail-url https://mail.example.com \
+  --opentrashmail-domain mail.example.com \
+  --opentrashmail-password your-password \
+  --once
+```
 
 ---
 
