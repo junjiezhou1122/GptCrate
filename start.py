@@ -18,44 +18,80 @@ def select_platform():
     print("请选择邮箱平台:")
     print("  1. LuckMail (推荐 - 自动接码，省心省力)")
     print("  2. Hotmail007 (需要已有微软邮箱)")
+    print("  3. OpenTrashmail (自建临时邮箱服务)")
     print()
     
     while True:
-        choice = input("请输入选项 (1/2): ").strip()
+        choice = input("请输入选项 (1/2/3): ").strip()
         if choice == "1":
             return "luckmail"
         elif choice == "2":
             return "hotmail007"
+        elif choice == "3":
+            return "opentrashmail"
         else:
-            print("无效选项，请输入 1 或 2")
+            print("无效选项，请输入 1、2 或 3")
 
-def get_api_key(platform):
-    # 先检查 .env 文件是否已有 API Key
-    env_key = None
-    if platform == "luckmail":
-        env_key = "LUCKMAIL_API_KEY"
-    else:
-        env_key = "HOTMAIL007_API_KEY"
-    
+def get_env_value(env_key):
     if os.path.exists(".env"):
         with open(".env", "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip().startswith(env_key + "="):
                     existing_key = line.split("=", 1)[1].strip()
                     if existing_key and not existing_key.startswith("你的"):
-                        print(f"\n✅ 检测到已配置的 {platform} API Key，跳过输入")
                         return existing_key
-    
-    # 如果没有配置，让用户输入
+    return ""
+
+def get_platform_config(platform):
     if platform == "luckmail":
+        existing_key = get_env_value("LUCKMAIL_API_KEY")
+        if existing_key:
+            print("\n✅ 检测到已配置的 luckmail API Key，跳过输入")
+            return {"api_key": existing_key}
         print("\n请输入 LuckMail API Key:")
         print("(在你的 LuckMail 账户 -> API 中获取)")
-    else:
+        api_key = input("请输入 API Key: ").strip()
+        return {"api_key": api_key}
+    if platform == "hotmail007":
+        existing_key = get_env_value("HOTMAIL007_API_KEY")
+        if existing_key:
+            print("\n✅ 检测到已配置的 hotmail007 API Key，跳过输入")
+            return {"api_key": existing_key}
         print("\n请输入 Hotmail007 API Key:")
         print("(在你的 Hotmail007 账户 -> API 中获取)")
-    
-    api_key = input("请输入 API Key: ").strip()
-    return api_key
+        api_key = input("请输入 API Key: ").strip()
+        return {"api_key": api_key}
+
+    base_url = get_env_value("OPENTRASHMAIL_BASE_URL")
+    domain = get_env_value("OPENTRASHMAIL_DOMAIN")
+    password = get_env_value("OPENTRASHMAIL_PASSWORD")
+
+    if base_url:
+        print("\n✅ 检测到已配置的 OpenTrashmail 服务地址，跳过输入")
+    else:
+        print("\n请输入 OpenTrashmail 服务地址:")
+        print("(例如 https://mail.example.com)")
+        base_url = input("请输入服务地址: ").strip().rstrip("/")
+
+    if domain:
+        print("✅ 检测到已配置的 OpenTrashmail 邮箱域名，跳过输入")
+    else:
+        print("\n请输入 OpenTrashmail 邮箱域名:")
+        print("(例如 mail.example.com)")
+        domain = input("请输入邮箱域名: ").strip()
+
+    if password:
+        print("✅ 检测到已配置的 OpenTrashmail API 密码，跳过输入")
+    else:
+        print("\n请输入 OpenTrashmail API 密码:")
+        print("(如果未设置 PASSWORD，可直接回车留空)")
+        password = input("请输入 API 密码: ").strip()
+
+    return {
+        "base_url": base_url,
+        "domain": domain,
+        "password": password,
+    }
 
 def get_count():
     print("\n请输入要注册的账号数量:")
@@ -91,7 +127,7 @@ def get_threads():
         except ValueError:
             print("请输入有效的数字")
 
-def generate_env(platform, api_key, count, threads):
+def generate_env(platform, platform_config, count, threads):
     env_content = f"""MAIL_DOMAIN=
 MAIL_WORKER_BASE=
 MAIL_ADMIN_PASSWORD=
@@ -113,15 +149,22 @@ ACCOUNTS_FILE=accounts.txt
         env_content += f"""
 # LuckMail 模式配置
 LUCKMAIL_API_URL=https://mails.luckyous.com/api/v1/openapi
-LUCKMAIL_API_KEY={api_key}
+LUCKMAIL_API_KEY={platform_config["api_key"]}
 """
-    else:
+    elif platform == "hotmail007":
         env_content += f"""
 # Hotmail007 模式配置
 HOTMAIL007_API_URL=https://gapi.hotmail007.com
-HOTMAIL007_API_KEY={api_key}
+HOTMAIL007_API_KEY={platform_config["api_key"]}
 HOTMAIL007_MAIL_TYPE=hotmail Trusted Graph
 HOTMAIL007_MAIL_MODE=imap
+"""
+    else:
+        env_content += f"""
+# OpenTrashmail 模式配置
+OPENTRASHMAIL_BASE_URL={platform_config["base_url"]}
+OPENTRASHMAIL_DOMAIN={platform_config["domain"]}
+OPENTRASHMAIL_PASSWORD={platform_config["password"]}
 """
     
     with open(".env", "w", encoding="utf-8") as f:
@@ -161,10 +204,15 @@ def main():
     platform = select_platform()
     
     # 获取 API Key
-    api_key = get_api_key(platform)
-    if not api_key:
-        print("错误: API Key 不能为空")
-        sys.exit(1)
+    platform_config = get_platform_config(platform)
+    if platform in ("luckmail", "hotmail007"):
+        if not platform_config.get("api_key"):
+            print("错误: API Key 不能为空")
+            sys.exit(1)
+    else:
+        if not platform_config.get("base_url") or not platform_config.get("domain"):
+            print("错误: OpenTrashmail 服务地址和邮箱域名不能为空")
+            sys.exit(1)
     
     # 获取数量
     count = get_count()
@@ -173,7 +221,7 @@ def main():
     threads = get_threads()
     
     # 生成配置
-    generate_env(platform, api_key, count, threads)
+    generate_env(platform, platform_config, count, threads)
     print("\n✅ 配置文件已生成!")
     
     # 运行

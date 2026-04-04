@@ -51,10 +51,21 @@ def _load_dotenv(path: str = ".env") -> None:
 
 _load_dotenv()
 
+
+def _get_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return default
+
+
 MAIL_DOMAIN =os.getenv("MAIL_DOMAIN", "")
 MAIL_WORKER_BASE = os.getenv("MAIL_WORKER_BASE", "").rstrip("/")
 MAIL_ADMIN_PASSWORD = os.getenv("MAIL_ADMIN_PASSWORD", "")
-TOKEN_OUTPUT_DIR = os.getenv("TOKEN_OUTPUT_DIR", "tokens").strip()
+TOKEN_OUTPUT_DIR = os.getenv("TOKEN_OUTPUT_DIR", "").strip()
 CLI_PROXY_AUTHS_DIR = os.getenv("CLI_PROXY_AUTHS_DIR", "").strip()
 
 PROXY_FILE = os.getenv("PROXY_FILE", "").strip()
@@ -71,6 +82,11 @@ HOTMAIL007_MAIL_MODE = os.getenv("HOTMAIL007_MAIL_MODE", "graph").strip().lower(
 LUCKMAIL_API_KEY = os.getenv("LUCKMAIL_API_KEY", "").strip()
 LUCKMAIL_API_URL = os.getenv("LUCKMAIL_API_URL", "https://mails.luckyous.com/api/v1/openapi").rstrip("/")
 LUCKMAIL_AUTO_BUY = os.getenv("LUCKMAIL_AUTO_BUY", "false").strip().lower() == "true"
+OPENTRASHMAIL_BASE_URL = os.getenv("OPENTRASHMAIL_BASE_URL", "").rstrip("/")
+OPENTRASHMAIL_PASSWORD = os.getenv("OPENTRASHMAIL_PASSWORD", "").strip()
+OPENTRASHMAIL_DOMAIN = os.getenv("OPENTRASHMAIL_DOMAIN", "").strip()
+OPENTRASHMAIL_POLL_TIMEOUT = _get_int_env("OPENTRASHMAIL_POLL_TIMEOUT", 120)
+OPENTRASHMAIL_POLL_INTERVAL = _get_int_env("OPENTRASHMAIL_POLL_INTERVAL", 3)
 
 ACCOUNTS_FILE = os.getenv("ACCOUNTS_FILE", "accounts.txt").strip()
 
@@ -166,7 +182,7 @@ def _skip_net_check() -> bool:
 
 
 def get_email_and_token(proxies: Any = None) -> tuple:
-    """根据 EMAIL_MODE 获取邮箱: file=从accounts.txt读取, cf=自有域名随机生成, hotmail007=API拉取微软邮箱, luckmail=API拉取已购邮箱"""
+    """根据 EMAIL_MODE 获取邮箱: file=从accounts.txt读取, cf=自有域名随机生成, hotmail007=API拉取微软邮箱, luckmail=API拉取已购邮箱, opentrashmail=自建临时邮箱"""
     if EMAIL_MODE == "file":
         if _email_queue is None:
             print("[Error] 邮箱队列未初始化")
@@ -218,6 +234,21 @@ def get_email_and_token(proxies: Any = None) -> tuple:
             "order_no": order_no,
         }
         return email, email
+    if EMAIL_MODE == "opentrashmail":
+        if not OPENTRASHMAIL_BASE_URL:
+            print("[Error] OPENTRASHMAIL_BASE_URL 未配置")
+            return "", ""
+        domain = _pick_opentrashmail_domain()
+        if not domain:
+            print("[Error] OPENTRASHMAIL_DOMAIN 未配置")
+            return "", ""
+        prefix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+        email = f"{prefix}@{domain}"
+        _opentrashmail_credentials[email] = {
+            "known_ids": set(),
+        }
+        print(f"[*] OpenTrashmail 随机邮箱: {email}")
+        return email, email
     prefix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
     email = f"{prefix}@{MAIL_DOMAIN}"
     return email, email
@@ -242,7 +273,7 @@ def _extract_otp_code(content: str) -> str:
 
 
 def get_oai_code(token: str, email: str, proxies: Any = None, seen_ids: set = None) -> str:
-    """根据 EMAIL_MODE 获取 OpenAI 验证码: cf=Cloudflare Worker, hotmail007=Outlook Graph/IMAP, luckmail=LuckMail API"""
+    """根据 EMAIL_MODE 获取 OpenAI 验证码: cf=Cloudflare Worker, hotmail007=Outlook Graph/IMAP, luckmail=LuckMail API, opentrashmail=OpenTrashmail JSON API"""
     if EMAIL_MODE == "hotmail007":
         creds = _hotmail007_credentials.get(email, {})
         if not creds:
@@ -277,6 +308,40 @@ def get_oai_code(token: str, email: str, proxies: Any = None, seen_ids: set = No
                 return code
             print(".", end="", flush=True)
             time.sleep(3)
+        print(" 超时，未收到验证码")
+        return ""
+    if EMAIL_MODE == "opentrashmail":
+        creds = _opentrashmail_credentials.setdefault(email, {"known_ids": set()})
+        known_ids = creds.setdefault("known_ids", set())
+        if seen_ids:
+            known_ids.update(seen_ids)
+        print(f"[*] 正在轮询 OpenTrashmail 邮箱 {email}...", end="", flush=True)
+        start_time = time.time()
+        last_err = ""
+        while time.time() - start_time < OPENTRASHMAIL_POLL_TIMEOUT:
+            mails, err = opentrashmail_list_mails(email, proxies=proxies)
+            if err:
+                if err != last_err:
+                    print(f"\n[OpenTrashmail] 拉取邮件失败: {err}")
+                    last_err = err
+            else:
+                last_err = ""
+                for mail in mails:
+                    mail_id = _opentrashmail_message_id(mail)
+                    if mail_id in known_ids:
+                        continue
+                    known_ids.add(mail_id)
+                    content = _opentrashmail_message_text(mail)
+                    code = _extract_otp_code(content)
+                    if not code:
+                        detail, detail_err = opentrashmail_get_mail_detail(email, mail_id, proxies=proxies)
+                        if not detail_err and detail:
+                            code = _extract_otp_code(_opentrashmail_message_text(detail))
+                    if code:
+                        print(f" 抓到啦! 验证码: {code}")
+                        return code
+            print(".", end="", flush=True)
+            time.sleep(OPENTRASHMAIL_POLL_INTERVAL)
         print(" 超时，未收到验证码")
         return ""
     headers = {
@@ -328,7 +393,7 @@ def get_oai_code(token: str, email: str, proxies: Any = None, seen_ids: set = No
 
 
 def delete_temp_email(email: str, proxies: Any = None) -> None:
-    """注册成功后清理邮箱: hotmail007模式仅清理本地凭据, cf模式删除Worker邮件, luckmail模式清理本地凭据"""
+    """注册成功后清理邮箱: hotmail007模式仅清理本地凭据, cf模式删除Worker邮件, luckmail模式清理本地凭据, opentrashmail模式删除整个邮箱收件箱"""
     if EMAIL_MODE == "hotmail007":
         _hotmail007_credentials.pop(email, None)
         print(f"[*] Hotmail007 邮箱 {email} 本地凭据已清理")
@@ -336,6 +401,14 @@ def delete_temp_email(email: str, proxies: Any = None) -> None:
     if EMAIL_MODE == "luckmail":
         _luckmail_credentials.pop(email, None)
         print(f"[*] LuckMail 邮箱 {email} 本地凭据已清理")
+        return
+    if EMAIL_MODE == "opentrashmail":
+        err = opentrashmail_delete_account(email, proxies=proxies)
+        _opentrashmail_credentials.pop(email, None)
+        if err:
+            print(f"[*] OpenTrashmail 邮箱 {email} 清理失败: {err}")
+        else:
+            print(f"[*] OpenTrashmail 邮箱 {email} 已清理")
         return
     headers = {
         "x-admin-auth": MAIL_ADMIN_PASSWORD,
@@ -374,6 +447,7 @@ def delete_temp_email(email: str, proxies: Any = None) -> None:
 
 _hotmail007_credentials: Dict[str, dict] = {}
 _luckmail_credentials: Dict[str, dict] = {}
+_opentrashmail_credentials: Dict[str, dict] = {}
 
 
 def _hotmail007_api_get(path: str, proxies: Any = None, **params) -> dict:
@@ -496,7 +570,7 @@ def luckmail_create_order(email: str, proxies: Any = None) -> tuple:
     data = _luckmail_api_request("POST", "order/create",
                                 proxies=proxies,
                                 project_code="openai",
-                                email_type="ms_imap",
+                                email_type="ms_graph",
                                 domain="hotmail.com",
                                 specified_email="",
                                 variant_mode="")
@@ -513,6 +587,141 @@ def luckmail_get_code(order_no: str, proxies: Any = None) -> str:
         if result.get("status") == "success":
             return result.get("verification_code", "")
     return ""
+
+
+# ==========================================
+# OpenTrashmail API
+# ==========================================
+
+def _pick_opentrashmail_domain() -> str:
+    domains = []
+    for raw in OPENTRASHMAIL_DOMAIN.split(","):
+        domain = raw.strip().lstrip("*.").strip(".")
+        if domain:
+            domains.append(domain)
+    if not domains:
+        return ""
+    return random.choice(domains)
+
+
+def _opentrashmail_headers() -> dict:
+    headers = {}
+    if OPENTRASHMAIL_PASSWORD:
+        headers["PWD"] = OPENTRASHMAIL_PASSWORD
+    return headers
+
+
+def _opentrashmail_api_get(path: str, proxies: Any = None, timeout: int = 15) -> tuple:
+    if not OPENTRASHMAIL_BASE_URL:
+        return None, "OPENTRASHMAIL_BASE_URL 未配置"
+    url = f"{OPENTRASHMAIL_BASE_URL}/{path.lstrip('/')}"
+    try:
+        response = requests.get(
+            url,
+            headers=_opentrashmail_headers(),
+            proxies=proxies,
+            verify=_ssl_verify(),
+            timeout=timeout,
+            impersonate="safari",
+        )
+        if response.status_code != 200:
+            return None, f"HTTP {response.status_code}"
+        return response.json(), None
+    except Exception as e:
+        return None, str(e)[:200]
+
+
+def _opentrashmail_message_id(mail: Any) -> str:
+    if isinstance(mail, dict):
+        for key in ("id", "mail_id", "message_id", "uid", "uuid"):
+            value = mail.get(key)
+            if value not in (None, ""):
+                return str(value)
+        try:
+            payload = json.dumps(mail, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            payload = str(mail)
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+    return hashlib.sha1(str(mail).encode("utf-8")).hexdigest()
+
+
+def _opentrashmail_collect_text(value: Any, out: List[str]) -> None:
+    if value is None:
+        return
+    if isinstance(value, str):
+        if value.strip():
+            out.append(value)
+        return
+    if isinstance(value, dict):
+        preferred_keys = [
+            "subject", "from", "sender", "to", "body", "text", "plaintext",
+            "html", "raw", "snippet", "content",
+        ]
+        used = set()
+        for key in preferred_keys:
+            if key in value:
+                used.add(key)
+                _opentrashmail_collect_text(value.get(key), out)
+        for key, item in value.items():
+            if key in used:
+                continue
+            _opentrashmail_collect_text(item, out)
+        return
+    if isinstance(value, list):
+        for item in value:
+            _opentrashmail_collect_text(item, out)
+        return
+    out.append(str(value))
+
+
+def _opentrashmail_message_text(mail: Any) -> str:
+    parts: List[str] = []
+    _opentrashmail_collect_text(mail, parts)
+    return "\n".join(parts)
+
+
+def opentrashmail_list_mails(email: str, proxies: Any = None) -> tuple:
+    encoded_email = quote(email, safe="")
+    data, err = _opentrashmail_api_get(f"json/{encoded_email}", proxies=proxies, timeout=20)
+    if err:
+        return [], err
+    if isinstance(data, list):
+        return data, None
+    return [], "接口返回不是邮件列表"
+
+
+def opentrashmail_get_mail_detail(email: str, mail_id: str, proxies: Any = None) -> tuple:
+    encoded_email = quote(email, safe="")
+    encoded_id = quote(str(mail_id), safe="")
+    data, err = _opentrashmail_api_get(f"json/{encoded_email}/{encoded_id}", proxies=proxies, timeout=25)
+    if err:
+        return None, err
+    return data, None
+
+
+def opentrashmail_delete_account(email: str, proxies: Any = None) -> Optional[str]:
+    if not OPENTRASHMAIL_BASE_URL:
+        return "OPENTRASHMAIL_BASE_URL 未配置"
+    encoded_email = quote(email, safe="")
+    headers = _opentrashmail_headers()
+    for method in ("get", "delete"):
+        try:
+            request_fn = getattr(requests, method)
+            response = request_fn(
+                f"{OPENTRASHMAIL_BASE_URL}/api/deleteaccount/{encoded_email}",
+                headers=headers,
+                proxies=proxies,
+                verify=_ssl_verify(),
+                timeout=15,
+                impersonate="safari",
+            )
+            if response.status_code in (200, 204):
+                return None
+        except Exception as e:
+            last_err = str(e)[:200]
+        else:
+            last_err = f"HTTP {response.status_code}"
+    return last_err
 
 
 def _outlook_get_graph_token(client_id: str, refresh_token: str, proxies: Any = None) -> str:
@@ -1886,7 +2095,9 @@ def _worker(
 
 
 def main() -> None:
-    global EMAIL_MODE, HOTMAIL007_API_KEY, HOTMAIL007_MAIL_TYPE, HOTMAIL007_MAIL_MODE, _email_queue, LUCKMAIL_API_KEY, LUCKMAIL_AUTO_BUY
+    global EMAIL_MODE, HOTMAIL007_API_KEY, HOTMAIL007_MAIL_TYPE, HOTMAIL007_MAIL_MODE
+    global _email_queue, LUCKMAIL_API_KEY, LUCKMAIL_AUTO_BUY, ACCOUNTS_FILE
+    global OPENTRASHMAIL_BASE_URL, OPENTRASHMAIL_PASSWORD, OPENTRASHMAIL_DOMAIN
 
     parser = argparse.ArgumentParser(description="OpenAI 自动注册脚本")
     parser.add_argument(
@@ -1911,8 +2122,8 @@ def main() -> None:
         "--sleep-max", type=int, default=30, help="循环模式最长等待秒数"
     )
     parser.add_argument(
-        "--email-mode", default=None, choices=["cf", "hotmail007", "file", "luckmail"],
-        help="邮箱模式: file=从accounts.txt读取, cf=Cloudflare自有域名, hotmail007=API拉取微软邮箱, luckmail=API拉取已购邮箱 (默认读.env EMAIL_MODE)"
+        "--email-mode", default=None, choices=["cf", "hotmail007", "file", "luckmail", "opentrashmail"],
+        help="邮箱模式: file=从accounts.txt读取, cf=Cloudflare自有域名, hotmail007=API拉取微软邮箱, luckmail=API拉取已购邮箱, opentrashmail=自建临时邮箱 (默认读.env EMAIL_MODE)"
     )
     parser.add_argument(
         "--accounts-file", default=None,
@@ -1929,6 +2140,9 @@ def main() -> None:
     )
     parser.add_argument("--luckmail-key", default=None, help="LuckMail API Key (覆盖.env)")
     parser.add_argument("--luckmail-auto-buy", action="store_true", help="LuckMail 自动购买邮箱")
+    parser.add_argument("--opentrashmail-url", default=None, help="OpenTrashmail 服务地址 (覆盖.env)")
+    parser.add_argument("--opentrashmail-domain", default=None, help="OpenTrashmail 生成邮箱使用的域名，支持逗号分隔多个域名 (覆盖.env)")
+    parser.add_argument("--opentrashmail-password", default=None, help="OpenTrashmail API 密码 (覆盖.env)")
     args = parser.parse_args()
 
     if args.email_mode:
@@ -1951,6 +2165,12 @@ def main() -> None:
         LUCKMAIL_API_KEY = args.luckmail_key.strip()
     if args.luckmail_auto_buy:
         LUCKMAIL_AUTO_BUY = True
+    if args.opentrashmail_url:
+        OPENTRASHMAIL_BASE_URL = args.opentrashmail_url.strip().rstrip("/")
+    if args.opentrashmail_domain:
+        OPENTRASHMAIL_DOMAIN = args.opentrashmail_domain.strip()
+    if args.opentrashmail_password:
+        OPENTRASHMAIL_PASSWORD = args.opentrashmail_password.strip()
 
     proxy_file_path = args.proxy_file or PROXY_FILE
     proxy_list = _load_proxies(proxy_file_path)
@@ -2002,6 +2222,8 @@ def main() -> None:
         mode_label = "Cloudflare Worker (自有域名)"
     elif EMAIL_MODE == "luckmail":
         mode_label = "LuckMail API (hotmail邮箱)"
+    elif EMAIL_MODE == "opentrashmail":
+        mode_label = "OpenTrashmail (自建临时邮箱)"
     else:
         mode_label = "Hotmail007 API (微软邮箱)"
     print(f"  邮箱模式: {mode_label}")
@@ -2032,6 +2254,10 @@ def main() -> None:
             print(f"  当前库存: {stk}")
         else:
             print(f"  当前库存: 查询失败 ({stk_err})")
+    if EMAIL_MODE == "opentrashmail":
+        print(f"  服务地址: {OPENTRASHMAIL_BASE_URL or '(未配置)'}")
+        print(f"  邮箱域名: {OPENTRASHMAIL_DOMAIN or '(未配置)'}")
+        print(f"  访问密码: {'已配置' if OPENTRASHMAIL_PASSWORD else '未配置'}")
     print("=" * 60)
     print()
 
