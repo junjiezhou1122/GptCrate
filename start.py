@@ -30,6 +30,23 @@ def select_platform():
             print("无效选项，请输入 1 或 2")
 
 def get_api_key(platform):
+    # 先检查 .env 文件是否已有 API Key
+    env_key = None
+    if platform == "luckmail":
+        env_key = "LUCKMAIL_API_KEY"
+    else:
+        env_key = "HOTMAIL007_API_KEY"
+    
+    if os.path.exists(".env"):
+        with open(".env", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.strip().startswith(env_key + "="):
+                    existing_key = line.split("=", 1)[1].strip()
+                    if existing_key and not existing_key.startswith("你的"):
+                        print(f"\n✅ 检测到已配置的 {platform} API Key，跳过输入")
+                        return existing_key
+    
+    # 如果没有配置，让用户输入
     if platform == "luckmail":
         print("\n请输入 LuckMail API Key:")
         print("(在你的 LuckMail 账户 -> API 中获取)")
