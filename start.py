@@ -19,13 +19,46 @@ def select_platform():
     print("  1. LuckMail (推荐 - 自动接码，省心省力)")
     print("  2. Hotmail007 (需要已有微软邮箱)")
     print()
-    
+
     while True:
         choice = input("请输入选项 (1/2): ").strip()
         if choice == "1":
             return "luckmail"
         elif choice == "2":
             return "hotmail007"
+        else:
+            print("无效选项，请输入 1 或 2")
+
+def select_luckmail_mode():
+    print("\n请选择 LuckMail 工作模式:")
+    print("  1. 预检测模式 - 批量购买并检测活跃度 (推荐，需确保有库存)")
+    print("  2. 实时购买模式 - 注册时实时购买并检测")
+    print("  3. 接码模式 - 使用平台临时邮箱接收验证码")
+    print()
+
+    while True:
+        choice = input("请输入选项 (1/2/3): ").strip()
+        if choice == "1":
+            return "prefetch"
+        elif choice == "2":
+            return "realtime"
+        elif choice == "3":
+            return "order"
+        else:
+            print("无效选项，请输入 1、2 或 3")
+
+def select_email_type():
+    print("\n请选择邮箱类型:")
+    print("  1. ms_imap (IMAP协议接收邮件)")
+    print("  2. ms_graph (Microsoft Graph API)")
+    print()
+
+    while True:
+        choice = input("请输入选项 (1/2，默认1): ").strip()
+        if choice == "1" or choice == "":
+            return "ms_imap"
+        elif choice == "2":
+            return "ms_graph"
         else:
             print("无效选项，请输入 1 或 2")
 
@@ -91,7 +124,7 @@ def get_threads():
         except ValueError:
             print("请输入有效的数字")
 
-def generate_env(platform, api_key, count, threads):
+def generate_env(platform, api_key, count, threads, luckmail_mode="prefetch", email_type="ms_imap"):
     env_content = f"""MAIL_DOMAIN=
 MAIL_WORKER_BASE=
 MAIL_ADMIN_PASSWORD=
@@ -108,14 +141,24 @@ PROXY_FILE=proxies.txt
 EMAIL_MODE={platform}
 ACCOUNTS_FILE=accounts.txt
 """
-    
+
     if platform == "luckmail":
+        # 根据模式设置 LUCKMAIL_AUTO_BUY
+        if luckmail_mode == "prefetch":
+            auto_buy = "true"
+        elif luckmail_mode == "realtime":
+            auto_buy = "true"
+        else:  # order 模式
+            auto_buy = "false"
+
         env_content += f"""
 # LuckMail 模式配置
 LUCKMAIL_API_URL=https://mails.luckyous.com/api/v1/openapi
 LUCKMAIL_API_KEY={api_key}
-# 自动购买邮箱并检测活跃度（推荐开启）
-LUCKMAIL_AUTO_BUY=true
+# 邮箱类型: ms_imap 或 ms_graph
+LUCKMAIL_EMAIL_TYPE={email_type}
+# 自动购买邮箱并检测活跃度（true=预检测/实时购买，false=接码模式）
+LUCKMAIL_AUTO_BUY={auto_buy}
 # 邮箱不活跃时的最大重试次数
 LUCKMAIL_MAX_RETRY=3
 """
@@ -127,7 +170,7 @@ HOTMAIL007_API_KEY={api_key}
 HOTMAIL007_MAIL_TYPE=hotmail Trusted Graph
 HOTMAIL007_MAIL_MODE=imap
 """
-    
+
     with open(".env", "w", encoding="utf-8") as f:
         f.write(env_content)
 
@@ -151,35 +194,43 @@ def run_gpt(count, threads):
 
 def main():
     print_banner()
-    
+
     # 检查环境
     if not os.path.exists(".env.example"):
         print("错误: 未找到 .env.example 文件")
         sys.exit(1)
-    
+
     if not os.path.exists("gpt.py"):
         print("错误: 未找到 gpt.py 文件")
         sys.exit(1)
-    
+
     # 选择平台
     platform = select_platform()
-    
+
+    # LuckMail 额外选项
+    luckmail_mode = "prefetch"
+    email_type = "ms_imap"
+    if platform == "luckmail":
+        luckmail_mode = select_luckmail_mode()
+        if luckmail_mode in ["prefetch", "realtime"]:
+            email_type = select_email_type()
+
     # 获取 API Key
     api_key = get_api_key(platform)
     if not api_key:
         print("错误: API Key 不能为空")
         sys.exit(1)
-    
+
     # 获取数量
     count = get_count()
-    
+
     # 获取并发数
     threads = get_threads()
-    
+
     # 生成配置
-    generate_env(platform, api_key, count, threads)
+    generate_env(platform, api_key, count, threads, luckmail_mode, email_type)
     print("\n✅ 配置文件已生成!")
-    
+
     # 运行
     run_gpt(count, threads)
 

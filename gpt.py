@@ -72,6 +72,7 @@ HOTMAIL007_MAIL_MODE = os.getenv("HOTMAIL007_MAIL_MODE", "graph").strip().lower(
 LUCKMAIL_API_KEY = os.getenv("LUCKMAIL_API_KEY", "").strip()
 LUCKMAIL_API_URL = os.getenv("LUCKMAIL_API_URL", "https://mails.luckyous.com/api/v1/openapi").rstrip("/")
 LUCKMAIL_AUTO_BUY = os.getenv("LUCKMAIL_AUTO_BUY", "true").strip().lower() == "true"
+LUCKMAIL_EMAIL_TYPE = os.getenv("LUCKMAIL_EMAIL_TYPE", "ms_imap").strip().lower()
 try:
     LUCKMAIL_MAX_RETRY = int(os.getenv("LUCKMAIL_MAX_RETRY", "3").strip())
 except ValueError:
@@ -161,6 +162,10 @@ class EmailQueue:
 
 _email_queue: Optional[EmailQueue] = None
 
+# 预检测线程状态标志
+_prefetch_no_stock = False  # 是否无库存
+_prefetch_lock = threading.Lock()
+
 
 class ActiveEmailQueue:
     """线程安全的活跃邮箱队列，存储预检测的活跃邮箱"""
@@ -205,7 +210,7 @@ def _prefetch_active_emails(rotator: ProxyRotator, min_pool_size: int = 10, batc
     """后台线程：预检测邮箱池补充
     当活跃邮箱数量低于 min_pool_size 时，批量购买并检测
     """
-    global _active_email_queue
+    global _active_email_queue, _prefetch_no_stock
     if _active_email_queue is None:
         _active_email_queue = ActiveEmailQueue()
 
@@ -221,17 +226,32 @@ def _prefetch_active_emails(rotator: ProxyRotator, min_pool_size: int = 10, batc
                 proxy = rotator.next() if len(rotator) > 0 else None
                 proxies = {"http": proxy, "https": proxy} if proxy else None
 
-                active_emails = luckmail_batch_buy_and_check(
+                # 使用配置的邮箱类型
+                active_emails, error_msg = luckmail_batch_buy_and_check(
                     quantity=need_count,
                     max_workers=5,
-                    proxies=proxies
+                    proxies=proxies,
+                    email_type=LUCKMAIL_EMAIL_TYPE
                 )
 
                 if active_emails:
                     _active_email_queue.add_batch(active_emails)
+                    # 如果有库存了，重置无库存标志
+                    with _prefetch_lock:
+                        if _prefetch_no_stock:
+                            _prefetch_no_stock = False
+                            print(f"[*] [预检测] 库存恢复，继续预检测模式")
                     print(f"[*] [预检测] ✓ 已补充 {len(active_emails)} 个活跃邮箱 | 队列: {len(_active_email_queue)} 个")
                 else:
-                    print(f"[*] [预检测] ✗ 未获取到活跃邮箱，5秒后重试...")
+                    # 检查是否是无库存错误
+                    if error_msg and ("库存" in error_msg or "stock" in error_msg.lower()):
+                        with _prefetch_lock:
+                            _prefetch_no_stock = True
+                        print(f"[*] [预检测] ✗ 无库存，自动切换回接码模式")
+                        print(f"[*] [预检测] 预检测线程退出")
+                        return  # 退出预检测线程
+                    else:
+                        print(f"[*] [预检测] ✗ 未获取到活跃邮箱，5秒后重试...")
 
             time.sleep(2)  # 每2秒检查一次，更频繁地补充
         except Exception as e:
@@ -316,8 +336,8 @@ def get_email_and_token(proxies: Any = None) -> tuple:
         # 自动购买模式：购买 -> 检测活跃度 -> 使用
         max_retries = LUCKMAIL_MAX_RETRY
         for attempt in range(1, max_retries + 1):
-            print(f"[*] LuckMail 自动购买模式 (尝试 {attempt}/{max_retries}): 购买 Hotmail 邮箱...")
-            purchase_data, err = luckmail_buy_email(proxies=proxies)
+            print(f"[*] LuckMail 自动购买模式 (尝试 {attempt}/{max_retries}): 购买 {LUCKMAIL_EMAIL_TYPE} 邮箱...")
+            purchase_data, err = luckmail_buy_email(proxies=proxies, email_type=LUCKMAIL_EMAIL_TYPE)
             if err or not purchase_data:
                 print(f"[Error] 购买邮箱失败: {err}")
                 if attempt == max_retries:
@@ -676,13 +696,13 @@ def luckmail_get_purchases(proxies: Any = None) -> tuple:
     return [], data.get("message", "获取已购邮箱失败")
 
 
-def luckmail_buy_email(proxies: Any = None) -> tuple:
+def luckmail_buy_email(proxies: Any = None, email_type: str = "ms_imap") -> tuple:
     """购买 hotmail/outlook 邮箱"""
     data = _luckmail_api_request("POST", "email/purchase",
                                 proxies=proxies,
-                                email_type="ms_imap",  # 使用 ms_imap 类型
-                                project_code="openai",  # 项目代码
-                                domain="hotmail.com",  # 域名
+                                email_type=email_type,
+                                project_code="openai",
+                                domain="hotmail.com",
                                 quantity=1,
                                 variant_mode="")
     if data.get("code") == 0:
@@ -739,31 +759,32 @@ def luckmail_disable_email(purchase_id: int, disabled: bool = True, proxies: Any
         return False
 
 
-def luckmail_batch_buy_and_check(quantity: int = 10, max_workers: int = 5, proxies: Any = None) -> list:
+def luckmail_batch_buy_and_check(quantity: int = 10, max_workers: int = 5, proxies: Any = None, email_type: str = "ms_imap") -> tuple:
     """批量购买邮箱并并行检测活跃度
-    返回: 活跃的邮箱列表 [{email, token, id}, ...]
+    返回: (活跃邮箱列表, 错误信息)  ([{email, token, id}, ...], error_msg)
     """
-    print(f"[*] 批量购买 {quantity} 个邮箱...")
+    print(f"[*] 批量购买 {quantity} 个邮箱 (类型: {email_type})...")
 
     # 1. 批量购买
     data = _luckmail_api_request("POST", "email/purchase",
                                 proxies=proxies,
-                                email_type="ms_imap",
+                                email_type=email_type,
                                 project_code="openai",
                                 domain="hotmail.com",
                                 quantity=quantity,
                                 variant_mode="")
 
     if data.get("code") != 0:
-        print(f"[Error] 批量购买失败: {data.get('message')}")
-        return []
+        error_msg = data.get('message', '未知错误')
+        print(f"[Error] 批量购买失败: {error_msg}")
+        return [], error_msg
 
     response_data = data.get("data", {})
     purchases = response_data.get("purchases", [])
 
     if not purchases:
         print("[Error] 没有购买到任何邮箱")
-        return []
+        return [], "没有购买到任何邮箱"
 
     print(f"[*] 成功购买 {len(purchases)} 个邮箱，开始并行检测活跃度...")
 
@@ -815,7 +836,7 @@ def luckmail_batch_buy_and_check(quantity: int = 10, max_workers: int = 5, proxi
         for email_data in active_emails:
             print(f"    ✓ {email_data['email']}")
 
-    return active_emails
+    return active_emails, None
 
 
 def luckmail_get_purchased_email_by_tag(tag: str = "", proxies: Any = None) -> tuple:
