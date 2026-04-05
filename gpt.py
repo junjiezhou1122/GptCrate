@@ -556,14 +556,25 @@ def get_oai_code(token: str, email: str, proxies: Any = None, seen_ids: set = No
 
 
 def delete_temp_email(email: str, proxies: Any = None) -> None:
-    """注册成功后清理邮箱: hotmail007模式仅清理本地凭据, cf模式删除Worker邮件, luckmail模式清理本地凭据"""
+    """注册成功后清理邮箱: hotmail007模式仅清理本地凭据, cf模式删除Worker邮件, luckmail模式清理本地凭据并禁用邮箱"""
     if EMAIL_MODE == "hotmail007":
         _hotmail007_credentials.pop(email, None)
         print(f"[*] Hotmail007 邮箱 {email} 本地凭据已清理")
         return
     if EMAIL_MODE == "luckmail":
-        _luckmail_credentials.pop(email, None)
-        print(f"[*] LuckMail 邮箱 {email} 本地凭据已清理")
+        creds = _luckmail_credentials.pop(email, None)
+        # 注册成功后禁用邮箱
+        if creds and "purchase_id" in creds:
+            purchase_id = creds["purchase_id"]
+            try:
+                if luckmail_disable_email(purchase_id, disabled=True, proxies=proxies):
+                    print(f"[*] LuckMail 邮箱 {email} 已禁用 (注册成功)")
+                else:
+                    print(f"[Warning] LuckMail 邮箱 {email} 禁用失败")
+            except Exception as e:
+                print(f"[Warning] 禁用邮箱 {email} 时出错: {e}")
+        else:
+            print(f"[*] LuckMail 邮箱 {email} 本地凭据已清理")
         return
     headers = {
         "x-admin-auth": MAIL_ADMIN_PASSWORD,
