@@ -174,7 +174,7 @@ class ActiveEmailQueue:
         self._emails: List[dict] = []  # [{email, token, id}, ...]
         self._lock = threading.Lock()
 
-    def add_batch(self, emails: list):
+    def add_batch(self, emails: list) -> None:
         """批量添加活跃邮箱"""
         with self._lock:
             self._emails.extend(emails)

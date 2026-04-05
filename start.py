@@ -7,14 +7,14 @@ import os
 import sys
 import shutil
 
-def print_banner():
+def print_banner() -> None:
     print("=" * 50)
     print("   OpenAI 自动注册工具")
     print("   一键启动器")
     print("=" * 50)
     print()
 
-def select_platform():
+def select_platform() -> str:
     print("请选择邮箱平台:")
     print("  1. LuckMail (推荐 - 自动接码，省心省力)")
     print("  2. Hotmail007 (需要已有微软邮箱)")
@@ -29,7 +29,7 @@ def select_platform():
         else:
             print("无效选项，请输入 1 或 2")
 
-def select_luckmail_mode():
+def select_luckmail_mode() -> str:
     print("\n请选择 LuckMail 工作模式:")
     print("  1. 预检测模式 - 批量购买并检测活跃度 (推荐，需确保有库存)")
     print("  2. 实时购买模式 - 注册时实时购买并检测")
@@ -50,7 +50,7 @@ def select_luckmail_mode():
         else:
             print("无效选项，请输入 1、2、3 或 4")
 
-def select_email_type():
+def select_email_type() -> str:
     print("\n请选择邮箱类型:")
     print("  1. ms_imap (IMAP协议接收邮件)")
     print("  2. ms_graph (Microsoft Graph API)")
@@ -127,7 +127,7 @@ def get_threads():
         except ValueError:
             print("请输入有效的数字")
 
-def generate_env(platform, api_key, count, threads, luckmail_mode="prefetch", email_type="ms_imap"):
+def generate_env(platform, api_key, count, threads, luckmail_mode: str="prefetch", email_type: str="ms_imap") -> None:
     env_content = f"""MAIL_DOMAIN=
 MAIL_WORKER_BASE=
 MAIL_ADMIN_PASSWORD=
@@ -179,7 +179,7 @@ HOTMAIL007_MAIL_MODE=imap
     with open(".env", "w", encoding="utf-8") as f:
         f.write(env_content)
 
-def run_gpt(count, threads):
+def run_gpt(count, threads) -> None:
     cmd = ["gpt.py"]
     
     if count:
@@ -197,7 +197,7 @@ def run_gpt(count, threads):
     
     os.execv(sys.executable, [sys.executable] + cmd)
 
-def main():
+def main() -> None:
     print_banner()
 
     # 检查环境
