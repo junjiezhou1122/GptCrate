@@ -363,7 +363,11 @@ def _skip_net_check() -> bool:
 
 
 def _prefetch_active_emails(
-    rotator: ProxyRotator, min_pool_size: int = 10, batch_size: int = 20
+    rotator: ProxyRotator,
+    min_pool_size: int = 10,
+    batch_size: int = 20,
+    resin_sticky: bool = False,
+    resin_platform: str = "Default",
 ):
     """后台线程：预检测邮箱池补充
     当活跃邮箱数量低于 min_pool_size 时，优先检查已购邮箱，不足时批量购买
@@ -385,7 +389,18 @@ def _prefetch_active_emails(
         # 首先检查已购邮箱
         print(f"\n[*] [预检测] 首先检查已购邮箱...")
         proxy = rotator.next() if len(rotator) > 0 else None
-        proxies = {"http": proxy, "https": proxy} if proxy else None
+
+        # 构建 Resin 粘性代理
+        effective_proxy = proxy
+        if resin_sticky and proxy:
+            resin_account = secrets.token_hex(6)
+            effective_proxy = _build_resin_proxy(proxy, resin_platform, resin_account)
+
+        proxies = (
+            {"http": effective_proxy, "https": effective_proxy}
+            if effective_proxy
+            else None
+        )
         purchased_active = luckmail_check_purchased_emails(
             proxies=proxies, max_workers=5
         )
@@ -413,7 +428,20 @@ def _prefetch_active_emails(
                 print(f"{'=' * 50}")
 
                 proxy = rotator.next() if len(rotator) > 0 else None
-                proxies = {"http": proxy, "https": proxy} if proxy else None
+
+                # 构建 Resin 粘性代理
+                effective_proxy = proxy
+                if resin_sticky and proxy:
+                    resin_account = secrets.token_hex(6)
+                    effective_proxy = _build_resin_proxy(
+                        proxy, resin_platform, resin_account
+                    )
+
+                proxies = (
+                    {"http": effective_proxy, "https": effective_proxy}
+                    if effective_proxy
+                    else None
+                )
 
                 # 使用配置的邮箱类型
                 active_emails, error_msg = luckmail_batch_buy_and_check(
@@ -3182,7 +3210,7 @@ def main() -> None:
             _active_email_queue = ActiveEmailQueue()
         prefetch_thread = threading.Thread(
             target=_prefetch_active_emails,
-            args=(rotator, 10, 20),  # 最小池大小10，批量购买20
+            args=(rotator, 10, 20, effective_resin_sticky, effective_resin_platform),
             daemon=True,
         )
         prefetch_thread.start()
