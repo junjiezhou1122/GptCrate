@@ -5,7 +5,46 @@ OpenAI 注册工具 - 一键启动器
 
 import os
 import sys
-import shutil
+from typing import Optional
+
+
+def _prompt_choice(prompt: str, options: dict[str, str], invalid_message: str) -> str:
+    while True:
+        choice = input(prompt).strip()
+        if choice in options:
+            return options[choice]
+        print(invalid_message)
+
+
+def _prompt_positive_int(prompt: str, default: Optional[int] = None) -> int:
+    while True:
+        raw = input(prompt).strip()
+        if not raw and default is not None:
+            return default
+        try:
+            value = int(raw)
+        except ValueError:
+            print("请输入有效的数字")
+            continue
+        if value > 0:
+            return value
+        print("请输入大于 0 的数字")
+
+
+def _prompt_optional_positive_int(prompt: str) -> Optional[int]:
+    while True:
+        raw = input(prompt).strip()
+        if not raw:
+            return None
+        try:
+            value = int(raw)
+        except ValueError:
+            print("请输入有效的数字")
+            continue
+        if value > 0:
+            return value
+        print("请输入大于 0 的数字")
+
 
 def print_banner() -> None:
     print("=" * 50)
@@ -19,15 +58,11 @@ def select_platform() -> str:
     print("  1. LuckMail (推荐 - 自动接码，省心省力)")
     print("  2. Hotmail007 (需要已有微软邮箱)")
     print()
-
-    while True:
-        choice = input("请输入选项 (1/2): ").strip()
-        if choice == "1":
-            return "luckmail"
-        elif choice == "2":
-            return "hotmail007"
-        else:
-            print("无效选项，请输入 1 或 2")
+    return _prompt_choice(
+        "请输入选项 (1/2): ",
+        {"1": "luckmail", "2": "hotmail007"},
+        "无效选项，请输入 1 或 2",
+    )
 
 def select_luckmail_mode() -> str:
     print("\n请选择 LuckMail 工作模式:")
@@ -36,52 +71,56 @@ def select_luckmail_mode() -> str:
     print("  3. 接码模式 - 使用平台临时邮箱接收验证码")
     print("  4. 已购邮箱模式 - 使用已购买的邮箱，检测活跃度后使用")
     print()
-
-    while True:
-        choice = input("请输入选项 (1/2/3/4): ").strip()
-        if choice == "1":
-            return "prefetch"
-        elif choice == "2":
-            return "realtime"
-        elif choice == "3":
-            return "order"
-        elif choice == "4":
-            return "purchased"
-        else:
-            print("无效选项，请输入 1、2、3 或 4")
+    return _prompt_choice(
+        "请输入选项 (1/2/3/4): ",
+        {
+            "1": "prefetch",
+            "2": "realtime",
+            "3": "order",
+            "4": "purchased",
+        },
+        "无效选项，请输入 1、2、3 或 4",
+    )
 
 def select_email_type() -> str:
     print("\n请选择邮箱类型:")
     print("  1. ms_imap (IMAP协议接收邮件)")
     print("  2. ms_graph (Microsoft Graph API)")
     print()
+    return _prompt_choice(
+        "请输入选项 (1/2，默认1): ",
+        {"": "ms_imap", "1": "ms_imap", "2": "ms_graph"},
+        "无效选项，请输入 1 或 2",
+    )
 
-    while True:
-        choice = input("请输入选项 (1/2，默认1): ").strip()
-        if choice == "1" or choice == "":
-            return "ms_imap"
-        elif choice == "2":
-            return "ms_graph"
-        else:
-            print("无效选项，请输入 1 或 2")
+def _read_env_value(path: str, key: str) -> Optional[str]:
+    if not os.path.exists(path):
+        return None
 
-def get_api_key(platform):
+    with open(path, "r", encoding="utf-8") as f:
+        for raw_line in f:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            current_key, value = line.split("=", 1)
+            if current_key.strip() != key:
+                continue
+            value = value.strip()
+            if "#" in value and not value.startswith(("'", '"')):
+                value = value.split("#", 1)[0].strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+                value = value[1:-1]
+            return value or None
+    return None
+
+def get_api_key(platform: str) -> str:
     # 先检查 .env 文件是否已有 API Key
-    env_key = None
-    if platform == "luckmail":
-        env_key = "LUCKMAIL_API_KEY"
-    else:
-        env_key = "HOTMAIL007_API_KEY"
-    
-    if os.path.exists(".env"):
-        with open(".env", "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip().startswith(env_key + "="):
-                    existing_key = line.split("=", 1)[1].strip()
-                    if existing_key and not existing_key.startswith("你的"):
-                        print(f"\n✅ 检测到已配置的 {platform} API Key，跳过输入")
-                        return existing_key
-    
+    env_key = "LUCKMAIL_API_KEY" if platform == "luckmail" else "HOTMAIL007_API_KEY"
+    existing_key = _read_env_value(".env", env_key)
+    if existing_key and not existing_key.startswith("你的"):
+        print(f"\n✅ 检测到已配置的 {platform} API Key，跳过输入")
+        return existing_key
+
     # 如果没有配置，让用户输入
     if platform == "luckmail":
         print("\n请输入 LuckMail API Key:")
@@ -90,44 +129,28 @@ def get_api_key(platform):
         print("\n请输入 Hotmail007 API Key:")
         print("(在你的 Hotmail007 账户 -> API 中获取)")
     
-    api_key = input("请输入 API Key: ").strip()
-    return api_key
+    return input("请输入 API Key: ").strip()
 
-def get_count():
+def get_count() -> Optional[int]:
     print("\n请输入要注册的账号数量:")
     print("(直接回车表示无限循环，直到 Ctrl+C 停止)")
-    
-    while True:
-        count_input = input("请输入数量 (或直接回车): ").strip()
-        if not count_input:
-            return None
-        try:
-            count = int(count_input)
-            if count > 0:
-                return count
-            else:
-                print("请输入大于 0 的数字")
-        except ValueError:
-            print("请输入有效的数字")
+    return _prompt_optional_positive_int("请输入数量 (或直接回车): ")
 
-def get_threads():
+def get_threads() -> int:
     print("\n请输入并发线程数:")
     print("(建议 1-5，太高可能容易被封)")
-    
-    while True:
-        threads_input = input("请输入线程数 (默认 1): ").strip()
-        if not threads_input:
-            return 1
-        try:
-            threads = int(threads_input)
-            if threads > 0:
-                return threads
-            else:
-                print("请输入大于 0 的数字")
-        except ValueError:
-            print("请输入有效的数字")
+    return _prompt_positive_int("请输入线程数 (默认 1): ", default=1)
 
-def generate_env(platform, api_key, count, threads, luckmail_mode: str="prefetch", email_type: str="ms_imap") -> None:
+def generate_env(
+    platform: str,
+    api_key: str,
+    count: Optional[int],
+    threads: int,
+    luckmail_mode: str = "prefetch",
+    email_type: str = "ms_imap",
+) -> None:
+    batch_count_line = f"BATCH_COUNT={count}" if count else "# BATCH_COUNT=10"
+    batch_threads_line = f"BATCH_THREADS={threads}"
     env_content = f"""MAIL_DOMAIN=
 MAIL_WORKER_BASE=
 MAIL_ADMIN_PASSWORD=
@@ -137,8 +160,8 @@ CLI_PROXY_AUTHS_DIR=
 PROXY_FILE=proxies.txt
 
 # 批量注册配置
-# BATCH_COUNT=10
-# BATCH_THREADS=1
+{batch_count_line}
+{batch_threads_line}
 
 # 邮箱模式
 EMAIL_MODE={platform}
@@ -176,6 +199,8 @@ LUCKMAIL_AUTO_BUY={auto_buy}
 LUCKMAIL_PURCHASED_ONLY={purchased_only}
 # 跳过已购邮箱检查（true=跳过已购邮箱直接购买新邮箱；false=先检查已购邮箱）
 LUCKMAIL_SKIP_PURCHASED={skip_purchased}
+# 已购/预检测邮箱活跃度检测并发数
+LUCKMAIL_CHECK_WORKERS=20
 # 邮箱不活跃时的最大重试次数
 LUCKMAIL_MAX_RETRY=3
 """
@@ -191,7 +216,7 @@ HOTMAIL007_MAIL_MODE=imap
     with open(".env", "w", encoding="utf-8") as f:
         f.write(env_content)
 
-def run_gpt(count, threads) -> None:
+def run_gpt(count: Optional[int], threads: int) -> None:
     cmd = ["gpt.py"]
     
     if count:
