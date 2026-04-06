@@ -10,6 +10,21 @@ import string
 import secrets
 import hashlib
 import base64
+import urllib.parse
+import urllib.request
+import urllib.error
+
+
+def _build_resin_proxy(resin_url: str, platform: str, account: str) -> str:
+    """将 Resin 网关地址转换为粘性代理 URL (V1 格式: Platform.Account:token@host:port)"""
+    parsed = urllib.parse.urlparse(resin_url)
+    token = parsed.password or ""
+    host = parsed.hostname or ""
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    auth = f"{platform}.{account}:{token}"
+    return f"{parsed.scheme}://{auth}@{host}:{port}"
+
+
 import threading
 import argparse
 import concurrent.futures
@@ -43,7 +58,7 @@ def _load_dotenv(path: str = ".env") -> None:
                 if not key or key in os.environ:
                     continue
                 value = value.strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in {'\"', "'"}:
+                if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
                     value = value[1:-1]
                 os.environ[key] = value
     except Exception:
@@ -52,7 +67,7 @@ def _load_dotenv(path: str = ".env") -> None:
 
 _load_dotenv()
 
-MAIL_DOMAIN =os.getenv("MAIL_DOMAIN", "")
+MAIL_DOMAIN = os.getenv("MAIL_DOMAIN", "")
 MAIL_WORKER_BASE = os.getenv("MAIL_WORKER_BASE", "").rstrip("/")
 MAIL_ADMIN_PASSWORD = os.getenv("MAIL_ADMIN_PASSWORD", "")
 TOKEN_OUTPUT_DIR = (os.getenv("TOKEN_OUTPUT_DIR") or "./tokens").strip()
@@ -60,17 +75,28 @@ CLI_PROXY_AUTHS_DIR = os.getenv("CLI_PROXY_AUTHS_DIR", "").strip()
 
 PROXY_FILE = os.getenv("PROXY_FILE", "").strip()
 SINGLE_PROXY = os.getenv("PROXY", "").strip()
+
+RESIN_URL = os.getenv("RESIN_URL", "").strip()
+RESIN_PLATFORM = os.getenv("RESIN_PLATFORM", "Default").strip()
+RESIN_STICKY = os.getenv("RESIN_STICKY", "false").strip().lower() == "true"
+
 BATCH_COUNT = os.getenv("BATCH_COUNT", "").strip()
 BATCH_THREADS = os.getenv("BATCH_THREADS", "").strip()
 
 EMAIL_MODE = os.getenv("EMAIL_MODE", "cf").strip().lower()
-HOTMAIL007_API_URL = os.getenv("HOTMAIL007_API_URL", "https://gapi.hotmail007.com").rstrip("/")
+HOTMAIL007_API_URL = os.getenv(
+    "HOTMAIL007_API_URL", "https://gapi.hotmail007.com"
+).rstrip("/")
 HOTMAIL007_API_KEY = os.getenv("HOTMAIL007_API_KEY", "").strip()
-HOTMAIL007_MAIL_TYPE = os.getenv("HOTMAIL007_MAIL_TYPE", "outlook Trusted Graph").strip()
+HOTMAIL007_MAIL_TYPE = os.getenv(
+    "HOTMAIL007_MAIL_TYPE", "outlook Trusted Graph"
+).strip()
 HOTMAIL007_MAIL_MODE = os.getenv("HOTMAIL007_MAIL_MODE", "graph").strip().lower()
 
 LUCKMAIL_API_KEY = os.getenv("LUCKMAIL_API_KEY", "").strip()
-LUCKMAIL_API_URL = os.getenv("LUCKMAIL_API_URL", "https://mails.luckyous.com/api/v1/openapi").rstrip("/")
+LUCKMAIL_API_URL = os.getenv(
+    "LUCKMAIL_API_URL", "https://mails.luckyous.com/api/v1/openapi"
+).rstrip("/")
 LUCKMAIL_AUTO_BUY = os.getenv("LUCKMAIL_AUTO_BUY", "true").strip().lower() == "true"
 LUCKMAIL_EMAIL_TYPE = os.getenv("LUCKMAIL_EMAIL_TYPE", "ms_imap").strip().lower()
 try:
@@ -206,7 +232,9 @@ def _skip_net_check() -> bool:
     return False
 
 
-def _prefetch_active_emails(rotator: ProxyRotator, min_pool_size: int = 10, batch_size: int = 20):
+def _prefetch_active_emails(
+    rotator: ProxyRotator, min_pool_size: int = 10, batch_size: int = 20
+):
     """后台线程：预检测邮箱池补充
     当活跃邮箱数量低于 min_pool_size 时，优先检查已购邮箱，不足时批量购买
     """
@@ -221,16 +249,20 @@ def _prefetch_active_emails(rotator: ProxyRotator, min_pool_size: int = 10, batc
     purchased_active = luckmail_check_purchased_emails(proxies=proxies, max_workers=5)
     if purchased_active:
         _active_email_queue.add_batch(purchased_active)
-        print(f"[*] [预检测] ✓ 已从已购邮箱中添加 {len(purchased_active)} 个活跃邮箱 | 队列: {len(_active_email_queue)} 个")
+        print(
+            f"[*] [预检测] ✓ 已从已购邮箱中添加 {len(purchased_active)} 个活跃邮箱 | 队列: {len(_active_email_queue)} 个"
+        )
 
     while True:
         try:
             current_size = len(_active_email_queue)
             if current_size < min_pool_size:
                 need_count = batch_size
-                print(f"\n{'='*50}")
-                print(f"[*] [预检测] 活跃邮箱池不足 ({current_size}/{min_pool_size})，批量购买 {need_count} 个...")
-                print(f"{'='*50}")
+                print(f"\n{'=' * 50}")
+                print(
+                    f"[*] [预检测] 活跃邮箱池不足 ({current_size}/{min_pool_size})，批量购买 {need_count} 个..."
+                )
+                print(f"{'=' * 50}")
 
                 proxy = rotator.next() if len(rotator) > 0 else None
                 proxies = {"http": proxy, "https": proxy} if proxy else None
@@ -240,7 +272,7 @@ def _prefetch_active_emails(rotator: ProxyRotator, min_pool_size: int = 10, batc
                     quantity=need_count,
                     max_workers=5,
                     proxies=proxies,
-                    email_type=LUCKMAIL_EMAIL_TYPE
+                    email_type=LUCKMAIL_EMAIL_TYPE,
                 )
 
                 if active_emails:
@@ -250,10 +282,14 @@ def _prefetch_active_emails(rotator: ProxyRotator, min_pool_size: int = 10, batc
                         if _prefetch_no_stock:
                             _prefetch_no_stock = False
                             print(f"[*] [预检测] 库存恢复，继续预检测模式")
-                    print(f"[*] [预检测] ✓ 已补充 {len(active_emails)} 个活跃邮箱 | 队列: {len(_active_email_queue)} 个")
+                    print(
+                        f"[*] [预检测] ✓ 已补充 {len(active_emails)} 个活跃邮箱 | 队列: {len(_active_email_queue)} 个"
+                    )
                 else:
                     # 检查是否是无库存错误
-                    if error_msg and ("库存" in error_msg or "stock" in error_msg.lower()):
+                    if error_msg and (
+                        "库存" in error_msg or "stock" in error_msg.lower()
+                    ):
                         with _prefetch_lock:
                             _prefetch_no_stock = True
                         print(f"[*] [预检测] ✗ 无库存，自动切换回接码模式")
@@ -345,8 +381,12 @@ def get_email_and_token(proxies: Any = None) -> tuple:
         # 自动购买模式：购买 -> 检测活跃度 -> 使用
         max_retries = LUCKMAIL_MAX_RETRY
         for attempt in range(1, max_retries + 1):
-            print(f"[*] LuckMail 自动购买模式 (尝试 {attempt}/{max_retries}): 购买 {LUCKMAIL_EMAIL_TYPE} 邮箱...")
-            purchase_data, err = luckmail_buy_email(proxies=proxies, email_type=LUCKMAIL_EMAIL_TYPE)
+            print(
+                f"[*] LuckMail 自动购买模式 (尝试 {attempt}/{max_retries}): 购买 {LUCKMAIL_EMAIL_TYPE} 邮箱..."
+            )
+            purchase_data, err = luckmail_buy_email(
+                proxies=proxies, email_type=LUCKMAIL_EMAIL_TYPE
+            )
             if err or not purchase_data:
                 print(f"[Error] 购买邮箱失败: {err}")
                 if attempt == max_retries:
@@ -376,7 +416,9 @@ def get_email_and_token(proxies: Any = None) -> tuple:
             purchase_id = purchase_data.get("id")
 
             if not email or not token:
-                print(f"[Error] 购买的邮箱信息不完整: email={email}, token={'有' if token else '无'}")
+                print(
+                    f"[Error] 购买的邮箱信息不完整: email={email}, token={'有' if token else '无'}"
+                )
                 print(f"[*] 完整数据: {purchase_data}")
                 if attempt == max_retries:
                     return "", ""
@@ -415,10 +457,9 @@ def get_email_and_token(proxies: Any = None) -> tuple:
             return email, email
 
         return "", ""
-    prefix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=10))
+    prefix = "".join(random.choices(string.ascii_lowercase + string.digits, k=10))
     email = f"{prefix}@{MAIL_DOMAIN}"
     return email, email
-
 
 
 def _extract_otp_code(content: str) -> str:
@@ -438,7 +479,9 @@ def _extract_otp_code(content: str) -> str:
     return fallback.group(1) if fallback else ""
 
 
-def get_oai_code(token: str, email: str, proxies: Any = None, seen_ids: set = None) -> str:
+def get_oai_code(
+    token: str, email: str, proxies: Any = None, seen_ids: set = None
+) -> str:
     """根据 EMAIL_MODE 获取 OpenAI 验证码: cf=Cloudflare Worker, hotmail007=Outlook Graph/IMAP, luckmail=LuckMail API"""
     if EMAIL_MODE == "hotmail007":
         creds = _hotmail007_credentials.get(email, {})
@@ -447,8 +490,12 @@ def get_oai_code(token: str, email: str, proxies: Any = None, seen_ids: set = No
             return ""
         known_ids = creds.get("known_ids", set())
         return _outlook_fetch_otp(
-            email, creds["client_id"], creds["refresh_token"],
-            known_ids=known_ids, proxies=proxies, timeout=120,
+            email,
+            creds["client_id"],
+            creds["refresh_token"],
+            known_ids=known_ids,
+            proxies=proxies,
+            timeout=120,
         )
     if EMAIL_MODE == "luckmail":
         creds = _luckmail_credentials.get(email, {})
@@ -537,9 +584,7 @@ def get_oai_code(token: str, email: str, proxies: Any = None, seen_ids: set = No
                     seen_ids.add(mail_id)
                     raw = mail.get("raw") or ""
                     content = raw
-                    subj_match = re.search(
-                        r"^Subject:\s*(.+)$", raw, re.MULTILINE
-                    )
+                    subj_match = re.search(r"^Subject:\s*(.+)$", raw, re.MULTILINE)
                     if subj_match:
                         content = subj_match.group(1) + "\n" + raw
                     code = _extract_otp_code(content)
@@ -591,7 +636,7 @@ def delete_temp_email(email: str, proxies: Any = None) -> None:
             timeout=15,
         )
         if res.status_code == 200:
-            for mail in (res.json().get("results") or []):
+            for mail in res.json().get("results") or []:
                 mail_id = mail.get("id")
                 if mail_id:
                     requests.delete(
@@ -618,17 +663,23 @@ _luckmail_credentials: Dict[str, dict] = {}
 def _hotmail007_api_get(path: str, proxies: Any = None, **params) -> dict:
     url = f"{HOTMAIL007_API_URL}/{path.lstrip('/')}"
     if params:
-        qs = "&".join(f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v)
+        qs = "&".join(
+            f"{k}={urllib.parse.quote(str(v))}" for k, v in params.items() if v
+        )
         url = f"{url}?{qs}"
     try:
-        r = requests.get(url, proxies=proxies, verify=_ssl_verify(), timeout=15, impersonate="safari")
+        r = requests.get(
+            url, proxies=proxies, verify=_ssl_verify(), timeout=15, impersonate="safari"
+        )
         return r.json()
     except Exception as e:
         return {"success": False, "message": str(e)[:200]}
 
 
 def hotmail007_get_balance(proxies: Any = None) -> tuple:
-    data = _hotmail007_api_get("api/user/balance", proxies=proxies, clientKey=HOTMAIL007_API_KEY)
+    data = _hotmail007_api_get(
+        "api/user/balance", proxies=proxies, clientKey=HOTMAIL007_API_KEY
+    )
     if data.get("success") and data.get("code") == 0:
         return data.get("data"), None
     return None, data.get("message", "查询余额失败")
@@ -649,7 +700,9 @@ def hotmail007_get_stock(proxies: Any = None) -> tuple:
                     t = (item.get("type") or "").strip().lower()
                     if t == HOTMAIL007_MAIL_TYPE.strip().lower():
                         return int(item.get("stock", 0)), None
-            total = sum(int(item.get("stock", 0)) for item in raw if isinstance(item, dict))
+            total = sum(
+                int(item.get("stock", 0)) for item in raw if isinstance(item, dict)
+            )
             return total, None
         return 0, None
     return None, data.get("message", "查询库存失败")
@@ -657,7 +710,8 @@ def hotmail007_get_stock(proxies: Any = None) -> tuple:
 
 def hotmail007_get_mail(quantity: int = 1, proxies: Any = None) -> tuple:
     data = _hotmail007_api_get(
-        "api/mail/getMail", proxies=proxies,
+        "api/mail/getMail",
+        proxies=proxies,
         clientKey=HOTMAIL007_API_KEY,
         mailType=HOTMAIL007_MAIL_TYPE,
         quantity=quantity,
@@ -677,7 +731,14 @@ def hotmail007_get_mail(quantity: int = 1, proxies: Any = None) -> tuple:
         cid = parts[-1].strip()
         rtk = ":".join(parts[2:-1]).strip()
         if email_addr:
-            out.append({"email": email_addr, "password": pwd, "refresh_token": rtk, "client_id": cid})
+            out.append(
+                {
+                    "email": email_addr,
+                    "password": pwd,
+                    "refresh_token": rtk,
+                    "client_id": cid,
+                }
+            )
     if not out:
         return [], "API 返回数据解析为空"
     return out, ""
@@ -687,19 +748,26 @@ def hotmail007_get_mail(quantity: int = 1, proxies: Any = None) -> tuple:
 # LuckMail API
 # ==========================================
 
-def _luckmail_api_request(method: str, endpoint: str, proxies: Any = None, **kwargs) -> dict:
+
+def _luckmail_api_request(
+    method: str, endpoint: str, proxies: Any = None, **kwargs
+) -> dict:
     """通用 LuckMail API 请求"""
     try:
         headers = {"X-API-Key": LUCKMAIL_API_KEY, "Content-Type": "application/json"}
         url = f"{LUCKMAIL_API_URL}/{endpoint.lstrip('/')}"
-        
+
         if method.upper() == "GET":
-            response = requests.get(url, headers=headers, params=kwargs, proxies=proxies, timeout=15)
+            response = requests.get(
+                url, headers=headers, params=kwargs, proxies=proxies, timeout=15
+            )
         elif method.upper() == "POST":
-            response = requests.post(url, headers=headers, json=kwargs, proxies=proxies, timeout=15)
+            response = requests.post(
+                url, headers=headers, json=kwargs, proxies=proxies, timeout=15
+            )
         else:
             return {"code": 9999, "message": "不支持的请求方法", "data": None}
-            
+
         return response.json()
     except Exception as e:
         print(f"[Error] LuckMail API 调用失败: {e}")
@@ -711,20 +779,25 @@ def luckmail_get_purchases(proxies: Any = None) -> tuple:
     data = _luckmail_api_request("GET", "email/purchases", proxies=proxies)
     if data.get("code") == 0:
         all_mails = data.get("data", {}).get("list", [])
-        hotmail_mails = [mail for mail in all_mails if "hotmail.com" in mail.get("email_address", "")]
+        hotmail_mails = [
+            mail for mail in all_mails if "hotmail.com" in mail.get("email_address", "")
+        ]
         return hotmail_mails, None
     return [], data.get("message", "获取已购邮箱失败")
 
 
 def luckmail_buy_email(proxies: Any = None, email_type: str = "ms_imap") -> tuple:
     """购买 hotmail/outlook 邮箱"""
-    data = _luckmail_api_request("POST", "email/purchase",
-                                proxies=proxies,
-                                email_type=email_type,
-                                project_code="openai",
-                                domain="hotmail.com",
-                                quantity=1,
-                                variant_mode="")
+    data = _luckmail_api_request(
+        "POST",
+        "email/purchase",
+        proxies=proxies,
+        email_type=email_type,
+        project_code="openai",
+        domain="hotmail.com",
+        quantity=1,
+        variant_mode="",
+    )
     if data.get("code") == 0:
         # API返回: data.purchases 列表
         response_data = data.get("data", {})
@@ -754,7 +827,10 @@ def luckmail_check_email_alive(token: str, proxies: Any = None) -> tuple:
             mail_count = result.get("mail_count", 0)
 
             if is_alive:
-                return True, f"邮箱活跃 ({email_addr}, 邮件数: {mail_count}, {status_msg})"
+                return (
+                    True,
+                    f"邮箱活跃 ({email_addr}, 邮件数: {mail_count}, {status_msg})",
+                )
             else:
                 return False, f"邮箱不活跃 ({email_addr}, {status_msg})"
         else:
@@ -763,7 +839,9 @@ def luckmail_check_email_alive(token: str, proxies: Any = None) -> tuple:
         return False, f"检测异常: {e}"
 
 
-def luckmail_disable_email(purchase_id: int, disabled: bool = True, proxies: Any = None) -> bool:
+def luckmail_disable_email(
+    purchase_id: int, disabled: bool = True, proxies: Any = None
+) -> bool:
     """设置已购邮箱的禁用状态
     disabled=True 表示禁用, False 表示启用
     """
@@ -771,7 +849,9 @@ def luckmail_disable_email(purchase_id: int, disabled: bool = True, proxies: Any
         headers = {"X-API-Key": LUCKMAIL_API_KEY, "Content-Type": "application/json"}
         url = f"{LUCKMAIL_API_URL}/email/purchases/{purchase_id}/disabled"
         payload = {"disabled": 1 if disabled else 0}
-        response = requests.put(url, headers=headers, json=payload, proxies=proxies, timeout=15)
+        response = requests.put(
+            url, headers=headers, json=payload, proxies=proxies, timeout=15
+        )
         data = response.json()
         return data.get("code") == 0
     except Exception as e:
@@ -779,23 +859,31 @@ def luckmail_disable_email(purchase_id: int, disabled: bool = True, proxies: Any
         return False
 
 
-def luckmail_batch_buy_and_check(quantity: int = 10, max_workers: int = 5, proxies: Any = None, email_type: str = "ms_imap") -> tuple:
+def luckmail_batch_buy_and_check(
+    quantity: int = 10,
+    max_workers: int = 5,
+    proxies: Any = None,
+    email_type: str = "ms_imap",
+) -> tuple:
     """批量购买邮箱并并行检测活跃度
     返回: (活跃邮箱列表, 错误信息)  ([{email, token, id}, ...], error_msg)
     """
     print(f"[*] 批量购买 {quantity} 个邮箱 (类型: {email_type})...")
 
     # 1. 批量购买
-    data = _luckmail_api_request("POST", "email/purchase",
-                                proxies=proxies,
-                                email_type=email_type,
-                                project_code="openai",
-                                domain="hotmail.com",
-                                quantity=quantity,
-                                variant_mode="")
+    data = _luckmail_api_request(
+        "POST",
+        "email/purchase",
+        proxies=proxies,
+        email_type=email_type,
+        project_code="openai",
+        domain="hotmail.com",
+        quantity=quantity,
+        variant_mode="",
+    )
 
     if data.get("code") != 0:
-        error_msg = data.get('message', '未知错误')
+        error_msg = data.get("message", "未知错误")
         print(f"[Error] 批量购买失败: {error_msg}")
         return [], error_msg
 
@@ -848,7 +936,9 @@ def luckmail_batch_buy_and_check(quantity: int = 10, max_workers: int = 5, proxi
 
     # 简洁的输出
     inactive_count = len(purchases) - len(active_emails)
-    print(f"[*] 检测完成: ✓活跃 {len(active_emails)} 个, ✗不活跃 {inactive_count} 个(已禁用{disabled_count}个)")
+    print(
+        f"[*] 检测完成: ✓活跃 {len(active_emails)} 个, ✗不活跃 {inactive_count} 个(已禁用{disabled_count}个)"
+    )
 
     # 显示活跃的邮箱
     if active_emails:
@@ -859,7 +949,9 @@ def luckmail_batch_buy_and_check(quantity: int = 10, max_workers: int = 5, proxi
     return active_emails, None
 
 
-def luckmail_get_purchased_emails(proxies: Any = None, page: int = 1, page_size: int = 50, user_disabled: int = 0) -> tuple:
+def luckmail_get_purchased_emails(
+    proxies: Any = None, page: int = 1, page_size: int = 50, user_disabled: int = 0
+) -> tuple:
     """获取已购邮箱列表
     user_disabled: 0=正常(非禁用), 1=已禁用
     返回: (邮箱列表, 错误信息)
@@ -867,12 +959,10 @@ def luckmail_get_purchased_emails(proxies: Any = None, page: int = 1, page_size:
     try:
         headers = {"X-API-Key": LUCKMAIL_API_KEY, "Content-Type": "application/json"}
         url = f"{LUCKMAIL_API_URL}/email/purchases"
-        params = {
-            "page": page,
-            "page_size": page_size,
-            "user_disabled": user_disabled
-        }
-        response = requests.get(url, headers=headers, params=params, proxies=proxies, timeout=15)
+        params = {"page": page, "page_size": page_size, "user_disabled": user_disabled}
+        response = requests.get(
+            url, headers=headers, params=params, proxies=proxies, timeout=15
+        )
         data = response.json()
 
         if data.get("code") == 0:
@@ -931,19 +1021,24 @@ def luckmail_check_purchased_emails(proxies: Any = None, max_workers: int = 5) -
             if result:
                 active_emails.append(result)
 
-    print(f"[*] 已购邮箱检测完成: ✓活跃 {len(active_emails)}/{len(mails)} 个, 已禁用 {disabled_count} 个不活跃邮箱")
+    print(
+        f"[*] 已购邮箱检测完成: ✓活跃 {len(active_emails)}/{len(mails)} 个, 已禁用 {disabled_count} 个不活跃邮箱"
+    )
     return active_emails
 
 
 def luckmail_create_order(email: str, proxies: Any = None) -> tuple:
     """创建验证码订单"""
-    data = _luckmail_api_request("POST", "order/create",
-                                proxies=proxies,
-                                project_code="openai",
-                                email_type="ms_imap",
-                                domain="hotmail.com",
-                                specified_email="",
-                                variant_mode="")
+    data = _luckmail_api_request(
+        "POST",
+        "order/create",
+        proxies=proxies,
+        project_code="openai",
+        email_type="ms_imap",
+        domain="hotmail.com",
+        specified_email="",
+        variant_mode="",
+    )
     if data.get("code") == 0:
         return data.get("data", {}).get("order_no"), data.get("data", {})
     return None, data.get("message", "创建订单失败")
@@ -983,7 +1078,9 @@ def luckmail_get_code_by_token(token: str, proxies: Any = None) -> str:
         return ""
 
 
-def _outlook_get_graph_token(client_id: str, refresh_token: str, proxies: Any = None) -> str:
+def _outlook_get_graph_token(
+    client_id: str, refresh_token: str, proxies: Any = None
+) -> str:
     url = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
     data = {
         "client_id": client_id,
@@ -992,9 +1089,13 @@ def _outlook_get_graph_token(client_id: str, refresh_token: str, proxies: Any = 
         "scope": "https://graph.microsoft.com/.default",
     }
     r = requests.post(
-        url, data=data,
+        url,
+        data=data,
         headers={"Content-Type": "application/x-www-form-urlencoded"},
-        proxies=proxies, verify=_ssl_verify(), timeout=30, impersonate="safari",
+        proxies=proxies,
+        verify=_ssl_verify(),
+        timeout=30,
+        impersonate="safari",
     )
     j = r.json()
     if not j.get("access_token"):
@@ -1005,14 +1106,18 @@ def _outlook_get_graph_token(client_id: str, refresh_token: str, proxies: Any = 
     return j["access_token"]
 
 
-def _outlook_get_imap_token(client_id: str, refresh_token: str, proxies: Any = None,
-                            email_addr: str = "") -> tuple:
+def _outlook_get_imap_token(
+    client_id: str, refresh_token: str, proxies: Any = None, email_addr: str = ""
+) -> tuple:
     import imaplib as _imaplib
+
     methods = [
         {
             "url": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
             "data": {
-                "client_id": client_id, "grant_type": "refresh_token", "refresh_token": refresh_token,
+                "client_id": client_id,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
                 "scope": "https://outlook.office365.com/IMAP.AccessAsUser.All offline_access",
             },
             "imap_server": "outlook.office365.com",
@@ -1020,7 +1125,9 @@ def _outlook_get_imap_token(client_id: str, refresh_token: str, proxies: Any = N
         {
             "url": "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
             "data": {
-                "client_id": client_id, "grant_type": "refresh_token", "refresh_token": refresh_token,
+                "client_id": client_id,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
                 "scope": "https://outlook.office365.com/IMAP.AccessAsUser.All offline_access",
             },
             "imap_server": "outlook.office365.com",
@@ -1028,14 +1135,20 @@ def _outlook_get_imap_token(client_id: str, refresh_token: str, proxies: Any = N
         {
             "url": "https://login.microsoftonline.com/consumers/oauth2/v2.0/token",
             "data": {
-                "client_id": client_id, "grant_type": "refresh_token", "refresh_token": refresh_token,
+                "client_id": client_id,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
                 "scope": "https://outlook.office.com/IMAP.AccessAsUser.All offline_access",
             },
             "imap_server": "outlook.live.com",
         },
         {
             "url": "https://login.live.com/oauth20_token.srf",
-            "data": {"client_id": client_id, "grant_type": "refresh_token", "refresh_token": refresh_token},
+            "data": {
+                "client_id": client_id,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+            },
             "imap_server": "outlook.office365.com",
         },
     ]
@@ -1043,9 +1156,13 @@ def _outlook_get_imap_token(client_id: str, refresh_token: str, proxies: Any = N
     for idx, m in enumerate(methods):
         try:
             r = requests.post(
-                m["url"], data=m["data"],
+                m["url"],
+                data=m["data"],
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
-                proxies=proxies, verify=_ssl_verify(), timeout=30, impersonate="safari",
+                proxies=proxies,
+                verify=_ssl_verify(),
+                timeout=30,
+                impersonate="safari",
             )
             j = r.json()
             if not j.get("access_token"):
@@ -1059,13 +1176,15 @@ def _outlook_get_imap_token(client_id: str, refresh_token: str, proxies: Any = N
                 try:
                     imap_test = _imaplib.IMAP4_SSL(server, 993)
                     auth_str = f"user={email_addr}auth=Bearer {token}"
-                    imap_test.authenticate("XOAUTH2", lambda x: auth_str.encode("utf-8"))
+                    imap_test.authenticate(
+                        "XOAUTH2", lambda x: auth_str.encode("utf-8")
+                    )
                     imap_test.select("INBOX")
                     imap_test.logout()
-                    print(f"[IMAP] 方法{idx+1}验证通过: {server}")
+                    print(f"[IMAP] 方法{idx + 1}验证通过: {server}")
                     return token, server
                 except Exception as ve:
-                    last_err = f"方法{idx+1} SELECT失败({server}): {ve}"
+                    last_err = f"方法{idx + 1} SELECT失败({server}): {ve}"
                     print(f"[IMAP] {last_err}")
                     continue
             else:
@@ -1076,9 +1195,15 @@ def _outlook_get_imap_token(client_id: str, refresh_token: str, proxies: Any = N
             last_err = str(e)
     raise Exception(f"IMAP 所有方法均失败: {last_err[:200]}")
 
-def _outlook_graph_get_openai_messages(access_token: str, proxies: Any = None, top: int = 10) -> list:
+
+def _outlook_graph_get_openai_messages(
+    access_token: str, proxies: Any = None, top: int = 10
+) -> list:
     all_items = []
-    headers_dict = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+    headers_dict = {
+        "Authorization": f"Bearer {access_token}",
+        "Accept": "application/json",
+    }
     params = {
         "$select": "id,subject,body,from,receivedDateTime",
         "$orderby": "receivedDateTime desc",
@@ -1088,9 +1213,13 @@ def _outlook_graph_get_openai_messages(access_token: str, proxies: Any = None, t
         url = f"https://graph.microsoft.com/v1.0/me/mailFolders/{folder}/messages"
         try:
             r = requests.get(
-                url, params=params,
+                url,
+                params=params,
                 headers=headers_dict,
-                proxies=proxies, verify=_ssl_verify(), timeout=30, impersonate="safari",
+                proxies=proxies,
+                verify=_ssl_verify(),
+                timeout=30,
+                impersonate="safari",
             )
             if r.status_code == 200:
                 all_items.extend(r.json().get("value", []))
@@ -1100,32 +1229,45 @@ def _outlook_graph_get_openai_messages(access_token: str, proxies: Any = None, t
         url_all = "https://graph.microsoft.com/v1.0/me/messages"
         try:
             r = requests.get(
-                url_all, params=params,
+                url_all,
+                params=params,
                 headers=headers_dict,
-                proxies=proxies, verify=_ssl_verify(), timeout=30, impersonate="safari",
+                proxies=proxies,
+                verify=_ssl_verify(),
+                timeout=30,
+                impersonate="safari",
             )
             if r.status_code == 200:
                 all_items = r.json().get("value", [])
         except Exception:
             pass
     return [
-        m for m in all_items
-        if "openai.com" in (m.get("from") or {}).get("emailAddress", {}).get("address", "").lower()
+        m
+        for m in all_items
+        if "openai.com"
+        in (m.get("from") or {}).get("emailAddress", {}).get("address", "").lower()
     ]
+
 
 def _outlook_graph_extract_otp(message: dict) -> str:
     subject = message.get("subject", "")
     body_content = (message.get("body") or {}).get("content", "")
     text = subject + "\n" + body_content
-    for pat in [r'>\s*(\d{6})\s*<', r'code[:\s]+(\d{6})', r'(\d{6})\s*\n', r'(?<!\d)(\d{6})(?!\d)']:
+    for pat in [
+        r">\s*(\d{6})\s*<",
+        r"code[:\s]+(\d{6})",
+        r"(\d{6})\s*\n",
+        r"(?<!\d)(\d{6})(?!\d)",
+    ]:
         m = re.search(pat, text, re.IGNORECASE | re.DOTALL)
         if m:
             return m.group(1)
     return ""
 
 
-def _outlook_get_known_ids(email_addr: str, client_id: str, refresh_token: str,
-                           proxies: Any = None) -> set:
+def _outlook_get_known_ids(
+    email_addr: str, client_id: str, refresh_token: str, proxies: Any = None
+) -> set:
     try:
         token = _outlook_get_graph_token(client_id, refresh_token, proxies)
         messages = _outlook_graph_get_openai_messages(token, proxies)
@@ -1137,15 +1279,25 @@ def _outlook_get_known_ids(email_addr: str, client_id: str, refresh_token: str,
         return set()
 
 
-def _outlook_fetch_otp_graph(email_addr: str, client_id: str, refresh_token: str,
-                             known_ids: set, proxies: Any = None, timeout: int = 120) -> str:
+def _outlook_fetch_otp_graph(
+    email_addr: str,
+    client_id: str,
+    refresh_token: str,
+    known_ids: set,
+    proxies: Any = None,
+    timeout: int = 120,
+) -> str:
     try:
         access_token = _outlook_get_graph_token(client_id, refresh_token, proxies)
     except Exception as e:
         print(f"[Graph] access token 失败: {e}")
         return ""
     _graph_debug_done = False
-    print(f"[Graph] 轮询收件箱(最多{timeout}s, 已知{len(known_ids)}封)...", end="", flush=True)
+    print(
+        f"[Graph] 轮询收件箱(最多{timeout}s, 已知{len(known_ids)}封)...",
+        end="",
+        flush=True,
+    )
     start = time.time()
     while time.time() - start < timeout:
         print(".", end="", flush=True)
@@ -1153,25 +1305,51 @@ def _outlook_fetch_otp_graph(email_addr: str, client_id: str, refresh_token: str
             messages = _outlook_graph_get_openai_messages(access_token, proxies)
             if not _graph_debug_done:
                 _graph_debug_done = True
-                headers_dict = {"Authorization": f"Bearer {access_token}", "Accept": "application/json"}
+                headers_dict = {
+                    "Authorization": f"Bearer {access_token}",
+                    "Accept": "application/json",
+                }
                 for dbg_folder in ["inbox", "junkemail"]:
                     try:
                         dbg_r = requests.get(
                             f"https://graph.microsoft.com/v1.0/me/mailFolders/{dbg_folder}/messages",
-                            params={"$top": "3", "$select": "id,subject,from,receivedDateTime"},
-                            headers=headers_dict, proxies=proxies, verify=_ssl_verify(), timeout=15, impersonate="safari",
+                            params={
+                                "$top": "3",
+                                "$select": "id,subject,from,receivedDateTime",
+                            },
+                            headers=headers_dict,
+                            proxies=proxies,
+                            verify=_ssl_verify(),
+                            timeout=15,
+                            impersonate="safari",
                         )
                         if dbg_r.status_code == 200:
                             dbg_msgs = dbg_r.json().get("value", [])
-                            print(f"\n[Graph调试] {dbg_folder}: {len(dbg_msgs)}封邮件", end="", flush=True)
+                            print(
+                                f"\n[Graph调试] {dbg_folder}: {len(dbg_msgs)}封邮件",
+                                end="",
+                                flush=True,
+                            )
                             for dm in dbg_msgs[:3]:
-                                fr = (dm.get("from") or {}).get("emailAddress", {}).get("address", "?")
+                                fr = (
+                                    (dm.get("from") or {})
+                                    .get("emailAddress", {})
+                                    .get("address", "?")
+                                )
                                 subj = (dm.get("subject") or "")[:40]
-                                print(f"\n  - from={fr} subj={subj}", end="", flush=True)
+                                print(
+                                    f"\n  - from={fr} subj={subj}", end="", flush=True
+                                )
                         else:
-                            print(f"\n[Graph调试] {dbg_folder}: HTTP {dbg_r.status_code}", end="", flush=True)
+                            print(
+                                f"\n[Graph调试] {dbg_folder}: HTTP {dbg_r.status_code}",
+                                end="",
+                                flush=True,
+                            )
                     except Exception as de:
-                        print(f"\n[Graph调试] {dbg_folder}异常: {de}", end="", flush=True)
+                        print(
+                            f"\n[Graph调试] {dbg_folder}异常: {de}", end="", flush=True
+                        )
             all_ids = {m["id"] for m in messages}
             new_ids = all_ids - known_ids
             for msg in [m for m in messages if m["id"] in new_ids]:
@@ -1186,16 +1364,29 @@ def _outlook_fetch_otp_graph(email_addr: str, client_id: str, refresh_token: str
     return ""
 
 
-def _outlook_fetch_otp_imap(email_addr: str, client_id: str, refresh_token: str,
-                            known_ids: set, proxies: Any = None, timeout: int = 120) -> str:
+def _outlook_fetch_otp_imap(
+    email_addr: str,
+    client_id: str,
+    refresh_token: str,
+    known_ids: set,
+    proxies: Any = None,
+    timeout: int = 120,
+) -> str:
     import imaplib
     import email as email_lib
+
     try:
-        access_token, imap_server = _outlook_get_imap_token(client_id, refresh_token, proxies, email_addr=email_addr)
+        access_token, imap_server = _outlook_get_imap_token(
+            client_id, refresh_token, proxies, email_addr=email_addr
+        )
     except Exception as e:
         print(f"[IMAP] access token 失败: {e}")
         return ""
-    print(f"[IMAP] 轮询收件箱(最多{timeout}s, 已知{len(known_ids)}封)...", end="", flush=True)
+    print(
+        f"[IMAP] 轮询收件箱(最多{timeout}s, 已知{len(known_ids)}封)...",
+        end="",
+        flush=True,
+    )
     start = time.time()
     while time.time() - start < timeout:
         print(".", end="", flush=True)
@@ -1219,16 +1410,25 @@ def _outlook_fetch_otp_imap(email_addr: str, client_id: str, refresh_token: str,
                         body = ""
                         if msg.is_multipart():
                             for part in msg.walk():
-                                if part.get_content_type() in ("text/plain", "text/html"):
+                                if part.get_content_type() in (
+                                    "text/plain",
+                                    "text/html",
+                                ):
                                     try:
-                                        body += (part.get_payload(decode=True) or b"").decode(
-                                            part.get_content_charset() or "utf-8", errors="ignore")
+                                        body += (
+                                            part.get_payload(decode=True) or b""
+                                        ).decode(
+                                            part.get_content_charset() or "utf-8",
+                                            errors="ignore",
+                                        )
                                     except Exception:
                                         pass
                         else:
                             try:
                                 body = (msg.get_payload(decode=True) or b"").decode(
-                                    msg.get_content_charset() or "utf-8", errors="ignore")
+                                    msg.get_content_charset() or "utf-8",
+                                    errors="ignore",
+                                )
                             except Exception:
                                 pass
                         code = _extract_otp_code(body)
@@ -1243,9 +1443,14 @@ def _outlook_fetch_otp_imap(email_addr: str, client_id: str, refresh_token: str,
         except Exception as e:
             err_str = str(e)
             print(f"\n[IMAP] 轮询出错: {e}", end="", flush=True)
-            if "not connected" in err_str.lower() or "authenticated but not connected" in err_str.lower():
+            if (
+                "not connected" in err_str.lower()
+                or "authenticated but not connected" in err_str.lower()
+            ):
                 try:
-                    access_token, imap_server = _outlook_get_imap_token(client_id, refresh_token, proxies, email_addr=email_addr)
+                    access_token, imap_server = _outlook_get_imap_token(
+                        client_id, refresh_token, proxies, email_addr=email_addr
+                    )
                     time.sleep(1)
                     continue
                 except Exception:
@@ -1255,11 +1460,19 @@ def _outlook_fetch_otp_imap(email_addr: str, client_id: str, refresh_token: str,
     return ""
 
 
-def _outlook_fetch_otp(email_addr: str, client_id: str, refresh_token: str,
-                       known_ids: set = None, proxies: Any = None, timeout: int = 120) -> str:
+def _outlook_fetch_otp(
+    email_addr: str,
+    client_id: str,
+    refresh_token: str,
+    known_ids: set = None,
+    proxies: Any = None,
+    timeout: int = 120,
+) -> str:
     if known_ids is None:
         known_ids = set()
-    return _outlook_fetch_otp_graph(email_addr, client_id, refresh_token, known_ids, proxies, timeout)
+    return _outlook_fetch_otp_graph(
+        email_addr, client_id, refresh_token, known_ids, proxies, timeout
+    )
 
 
 # ==========================================
@@ -1537,15 +1750,54 @@ def submit_callback_url(
 
 
 _FIRST_NAMES = [
-    "James", "John", "Robert", "Michael", "David", "William", "Richard",
-    "Joseph", "Thomas", "Christopher", "Daniel", "Matthew", "Anthony",
-    "Mary", "Patricia", "Jennifer", "Linda", "Elizabeth", "Barbara",
-    "Sarah", "Jessica", "Karen", "Emily", "Olivia", "Emma", "Sophia",
+    "James",
+    "John",
+    "Robert",
+    "Michael",
+    "David",
+    "William",
+    "Richard",
+    "Joseph",
+    "Thomas",
+    "Christopher",
+    "Daniel",
+    "Matthew",
+    "Anthony",
+    "Mary",
+    "Patricia",
+    "Jennifer",
+    "Linda",
+    "Elizabeth",
+    "Barbara",
+    "Sarah",
+    "Jessica",
+    "Karen",
+    "Emily",
+    "Olivia",
+    "Emma",
+    "Sophia",
 ]
 _LAST_NAMES = [
-    "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
-    "Davis", "Rodriguez", "Martinez", "Wilson", "Anderson", "Taylor",
-    "Thomas", "Moore", "Jackson", "Martin", "Lee", "Harris", "Clark",
+    "Smith",
+    "Johnson",
+    "Williams",
+    "Brown",
+    "Jones",
+    "Garcia",
+    "Miller",
+    "Davis",
+    "Rodriguez",
+    "Martinez",
+    "Wilson",
+    "Anderson",
+    "Taylor",
+    "Thomas",
+    "Moore",
+    "Jackson",
+    "Martin",
+    "Lee",
+    "Harris",
+    "Clark",
 ]
 
 
@@ -1571,10 +1823,20 @@ def _generate_password(length: int = 16) -> str:
     return "".join(chars)
 
 
-def run(proxy: Optional[str]) -> tuple:
+def run(
+    proxy: Optional[str], resin_sticky: bool = False, resin_platform: str = "Default"
+) -> tuple:
+    resin_account = secrets.token_hex(6) if resin_sticky else ""
+    effective_proxy = proxy
+    if resin_sticky and proxy:
+        effective_proxy = _build_resin_proxy(proxy, resin_platform, resin_account)
+        print(
+            f"[*] Resin 粘性代理已启用: Platform={resin_platform}, Account={resin_account}"
+        )
+
     proxies: Any = None
-    if proxy:
-        proxies = {"http": proxy, "https": proxy}
+    if effective_proxy:
+        proxies = {"http": effective_proxy, "https": effective_proxy}
 
     s = requests.Session(proxies=proxies, impersonate="safari")
 
@@ -1690,7 +1952,9 @@ def run(proxy: Optional[str]) -> tuple:
             register_page = ""
             print(f"[*] 注册响应(raw): {pwd_resp.text[:300]}")
 
-        need_otp = "email-verification" in register_continue or "verify" in register_continue
+        need_otp = (
+            "email-verification" in register_continue or "verify" in register_continue
+        )
         if not need_otp and register_page:
             need_otp = "verification" in register_page or "otp" in register_page
 
@@ -1741,7 +2005,12 @@ def run(proxy: Optional[str]) -> tuple:
                         time.sleep(2)
                     except Exception as e:
                         print(f"[*] 重发 OTP 异常: {e}")
-                code = get_oai_code(token=dev_token, email=email, proxies=proxies, seen_ids=processed_mails)
+                code = get_oai_code(
+                    token=dev_token,
+                    email=email,
+                    proxies=proxies,
+                    seen_ids=processed_mails,
+                )
                 if code:
                     break
             if not code:
@@ -1812,7 +2081,9 @@ def run(proxy: Optional[str]) -> tuple:
             verify=_ssl_verify(),
             timeout=15,
         )
-        sen_token2 = sen_resp2.json().get("token", "") if sen_resp2.status_code == 200 else ""
+        sen_token2 = (
+            sen_resp2.json().get("token", "") if sen_resp2.status_code == 200 else ""
+        )
         sentinel2 = f'{{"p": "", "t": "", "c": "{sen_token2}", "id": "{new_did}", "flow": "authorize_continue"}}'
 
         _post_with_retry(
@@ -1822,7 +2093,10 @@ def run(proxy: Optional[str]) -> tuple:
                 "openai-sentinel-token": sentinel2,
                 "content-type": "application/json",
             },
-            json_body={"username": {"value": email, "kind": "email"}, "screen_hint": "login"},
+            json_body={
+                "username": {"value": email, "kind": "email"},
+                "screen_hint": "login",
+            },
             proxies=proxies,
         )
 
@@ -1842,7 +2116,9 @@ def run(proxy: Optional[str]) -> tuple:
             try:
                 pwd_json = pwd_login_resp.json()
                 pwd_page = (pwd_json.get("page") or {}).get("type", "")
-                if "otp" in pwd_page or "verify" in str(pwd_json.get("continue_url", "")):
+                if "otp" in pwd_page or "verify" in str(
+                    pwd_json.get("continue_url", "")
+                ):
                     print("[*] 登录触发二次邮箱验证，等待验证码...")
                     code2 = ""
                     for otp2_attempt in range(5):
@@ -1864,7 +2140,12 @@ def run(proxy: Optional[str]) -> tuple:
                                 time.sleep(2)
                             except Exception as e:
                                 print(f"[*] 重发异常: {e}")
-                        code2 = get_oai_code(token=dev_token, email=email, proxies=proxies, seen_ids=processed_mails)
+                        code2 = get_oai_code(
+                            token=dev_token,
+                            email=email,
+                            proxies=proxies,
+                            seen_ids=processed_mails,
+                        )
                         if code2:
                             break
                     if not code2:
@@ -1949,7 +2230,9 @@ def run(proxy: Optional[str]) -> tuple:
                     org_body = {"org_id": org_id}
                     projects = (orgs[0] or {}).get("projects") or []
                     if projects:
-                        org_body["project_id"] = str((projects[0] or {}).get("id") or "").strip()
+                        org_body["project_id"] = str(
+                            (projects[0] or {}).get("id") or ""
+                        ).strip()
                     print(f"[*] 选择组织: {org_id}")
                     org_resp = _post_with_retry(
                         s,
@@ -1965,7 +2248,9 @@ def run(proxy: Optional[str]) -> tuple:
                         continue_url = org_resp.headers.get("Location", continue_url)
                     elif org_resp.status_code == 200:
                         try:
-                            continue_url = org_resp.json().get("continue_url", continue_url)
+                            continue_url = org_resp.json().get(
+                                "continue_url", continue_url
+                            )
                         except Exception:
                             pass
         except Exception as e:
@@ -2044,8 +2329,11 @@ def run(proxy: Optional[str]) -> tuple:
 AUTO_REGISTER_THRESHOLD = 10
 
 _INVALID_ERRORS = {
-    "account_deactivated", "invalid_api_key", "user_deactivated",
-    "account_banned", "invalid_grant",
+    "account_deactivated",
+    "invalid_api_key",
+    "user_deactivated",
+    "account_banned",
+    "invalid_grant",
 }
 
 
@@ -2078,14 +2366,18 @@ def _refresh_token(refresh_tok: str, proxies: Any = None) -> Dict[str, Any]:
                 "refresh_token": data.get("refresh_token", refresh_tok),
                 "id_token": data.get("id_token", ""),
                 "last_refresh": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
-                "expired": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + expires_in)),
+                "expired": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + expires_in)
+                ),
             }
         return {"ok": False, "error": f"HTTP {resp.status_code}: {resp.text[:200]}"}
     except Exception as e:
         return {"ok": False, "error": str(e)}
 
 
-def _test_token(access_token: str, account_id: str = "", proxies: Any = None) -> Dict[str, Any]:
+def _test_token(
+    access_token: str, account_id: str = "", proxies: Any = None
+) -> Dict[str, Any]:
     """调用 ChatGPT API 测试 token 是否有效，返回 {valid, reason}"""
     headers = {
         "Authorization": f"Bearer {access_token}",
@@ -2138,7 +2430,11 @@ def check_codex_tokens(proxies: Any = None) -> Dict[str, int]:
         print(f"[Error] 目录不存在: {CLI_PROXY_AUTHS_DIR}")
         return {"total": 0, "valid": 0, "refreshed": 0, "deleted": 0}
 
-    files = sorted(f for f in os.listdir(CLI_PROXY_AUTHS_DIR) if f.startswith("codex-") and f.endswith(".json"))
+    files = sorted(
+        f
+        for f in os.listdir(CLI_PROXY_AUTHS_DIR)
+        if f.startswith("codex-") and f.endswith(".json")
+    )
     if not files:
         print("[*] 没有找到 codex token 文件")
         return {"total": 0, "valid": 0, "refreshed": 0, "deleted": 0}
@@ -2169,22 +2465,33 @@ def check_codex_tokens(proxies: Any = None) -> Dict[str, int]:
             is_expired = True
 
         if is_expired:
-            print(f"  [{i}/{len(files)}] {email} - access_token 已过期，尝试刷新...", end="")
+            print(
+                f"  [{i}/{len(files)}] {email} - access_token 已过期，尝试刷新...",
+                end="",
+            )
             result = _refresh_token(refresh_tok, proxies=proxies)
             if result.get("ok"):
                 token_data["access_token"] = result["access_token"]
                 token_data["refresh_token"] = result["refresh_token"]
-                token_data["id_token"] = result.get("id_token", token_data.get("id_token", ""))
+                token_data["id_token"] = result.get(
+                    "id_token", token_data.get("id_token", "")
+                )
                 token_data["last_refresh"] = result["last_refresh"]
                 token_data["expired"] = result["expired"]
                 access_token = result["access_token"]
                 with open(fpath, "w", encoding="utf-8") as f:
-                    f.write(json.dumps(token_data, ensure_ascii=False, separators=(",", ":")))
+                    f.write(
+                        json.dumps(
+                            token_data, ensure_ascii=False, separators=(",", ":")
+                        )
+                    )
                 print(" 刷新成功!")
                 refreshed_count += 1
             else:
                 err = result.get("error", "")
-                if any(kw in err.lower() for kw in ("deactivat", "invalid_grant", "banned")):
+                if any(
+                    kw in err.lower() for kw in ("deactivat", "invalid_grant", "banned")
+                ):
                     os.remove(fpath)
                     print(f" 刷新失败(账号无效)，已删除")
                     deleted_count += 1
@@ -2209,11 +2516,17 @@ def check_codex_tokens(proxies: Any = None) -> Dict[str, int]:
                 if result.get("ok"):
                     token_data["access_token"] = result["access_token"]
                     token_data["refresh_token"] = result["refresh_token"]
-                    token_data["id_token"] = result.get("id_token", token_data.get("id_token", ""))
+                    token_data["id_token"] = result.get(
+                        "id_token", token_data.get("id_token", "")
+                    )
                     token_data["last_refresh"] = result["last_refresh"]
                     token_data["expired"] = result["expired"]
                     with open(fpath, "w", encoding="utf-8") as f:
-                        f.write(json.dumps(token_data, ensure_ascii=False, separators=(",", ":")))
+                        f.write(
+                            json.dumps(
+                                token_data, ensure_ascii=False, separators=(",", ":")
+                            )
+                        )
                     print(" 刷新成功!")
                     refreshed_count += 1
                     valid_count += 1
@@ -2224,8 +2537,15 @@ def check_codex_tokens(proxies: Any = None) -> Dict[str, int]:
             else:
                 print(f"  [{i}/{len(files)}] {email} - {reason}")
 
-    print(f"\n[*] 检测完毕: 有效 {valid_count} / 刷新 {refreshed_count} / 删除 {deleted_count} / 共 {len(files)}")
-    return {"total": len(files), "valid": valid_count, "refreshed": refreshed_count, "deleted": deleted_count}
+    print(
+        f"\n[*] 检测完毕: 有效 {valid_count} / 刷新 {refreshed_count} / 删除 {deleted_count} / 共 {len(files)}"
+    )
+    return {
+        "total": len(files),
+        "valid": valid_count,
+        "refreshed": refreshed_count,
+        "deleted": deleted_count,
+    }
 
 
 _file_write_lock = threading.Lock()
@@ -2265,7 +2585,11 @@ def _save_result(token_json: str, password: str, proxy_str: Optional[str]) -> No
             print(f"[*] 本地 token 文件已删除: {file_name}")
 
     if account_email and password:
-        accounts_file = os.path.join(TOKEN_OUTPUT_DIR, "accounts.txt") if TOKEN_OUTPUT_DIR else "./tokens/accounts.txt"
+        accounts_file = (
+            os.path.join(TOKEN_OUTPUT_DIR, "accounts.txt")
+            if TOKEN_OUTPUT_DIR
+            else "./tokens/accounts.txt"
+        )
         with _file_write_lock:
             os.makedirs(os.path.dirname(accounts_file), exist_ok=True)
             with open(accounts_file, "a", encoding="utf-8") as af:
@@ -2286,6 +2610,8 @@ def _worker(
     count_target: Optional[int],
     remaining: Optional[list],
     stop_event: threading.Event,
+    resin_sticky: bool = False,
+    resin_platform: str = "Default",
 ) -> int:
     """单个注册工作线程，返回本线程成功注册数"""
     global _success_counter
@@ -2307,10 +2633,14 @@ def _worker(
         proxy_str = rotator.next() if len(rotator) > 0 else single_proxy
         tag = f"[T{worker_id}#{local_round}]"
 
-        print(f"\n{tag} [{datetime.now().strftime('%H:%M:%S')}] 开始注册 (代理: {proxy_str or '直连'})")
+        print(
+            f"\n{tag} [{datetime.now().strftime('%H:%M:%S')}] 开始注册 (代理: {proxy_str or '直连'})"
+        )
 
         try:
-            token_json, password = run(proxy_str)
+            token_json, password = run(
+                proxy_str, resin_sticky=resin_sticky, resin_platform=resin_platform
+            )
 
             if token_json == "retry_403":
                 print(f"{tag} 检测到 403，等待10秒后重试...")
@@ -2328,7 +2658,11 @@ def _worker(
                 print(f"{tag} 注册成功! (本线程累计: {local_success})")
             else:
                 print(f"{tag} 本次注册失败")
-                if EMAIL_MODE == "file" and _email_queue is not None and len(_email_queue) == 0:
+                if (
+                    EMAIL_MODE == "file"
+                    and _email_queue is not None
+                    and len(_email_queue) == 0
+                ):
                     print(f"{tag} 邮箱队列已用完，停止线程")
                     break
 
@@ -2355,50 +2689,92 @@ def _worker(
 
 
 def main() -> None:
-    global EMAIL_MODE, HOTMAIL007_API_KEY, HOTMAIL007_MAIL_TYPE, HOTMAIL007_MAIL_MODE, _email_queue, LUCKMAIL_API_KEY, LUCKMAIL_AUTO_BUY
+    global \
+        EMAIL_MODE, \
+        HOTMAIL007_API_KEY, \
+        HOTMAIL007_MAIL_TYPE, \
+        HOTMAIL007_MAIL_MODE, \
+        _email_queue, \
+        LUCKMAIL_API_KEY, \
+        LUCKMAIL_AUTO_BUY
 
     parser = argparse.ArgumentParser(description="OpenAI 自动注册脚本")
     parser.add_argument(
         "--proxy", default=None, help="单个代理地址，如 http://127.0.0.1:7890"
     )
     parser.add_argument(
-        "--proxy-file", default=None,
-        help="代理列表文件路径 (每行一个代理)，批量注册时自动轮换"
+        "--proxy-file",
+        default=None,
+        help="代理列表文件路径 (每行一个代理)，批量注册时自动轮换",
+    )
+    parser.add_argument(
+        "--resin-sticky",
+        action="store_true",
+        default=None,
+        help="启用 Resin 粘性代理（整个注册流程使用同一个出口 IP），可覆盖.env RESIN_STICKY",
+    )
+    parser.add_argument(
+        "--resin-platform",
+        default=None,
+        help="Resin Platform 名称（默认: Default），可覆盖.env RESIN_PLATFORM",
     )
     parser.add_argument("--once", action="store_true", help="只运行一次")
     parser.add_argument(
-        "--count", type=int, default=None,
-        help="批量注册数量，如 --count 10 注册10个账号"
+        "--count",
+        type=int,
+        default=None,
+        help="批量注册数量，如 --count 10 注册10个账号",
     )
     parser.add_argument(
-        "--threads", type=int, default=1,
-        help="并发线程数 (默认1)，配合 --count 或循环模式使用"
+        "--threads",
+        type=int,
+        default=1,
+        help="并发线程数 (默认1)，配合 --count 或循环模式使用",
     )
-    parser.add_argument("--check", action="store_true", help="检测 auths 目录下 codex token 状态")
+    parser.add_argument(
+        "--check", action="store_true", help="检测 auths 目录下 codex token 状态"
+    )
     parser.add_argument("--sleep-min", type=int, default=5, help="循环模式最短等待秒数")
     parser.add_argument(
         "--sleep-max", type=int, default=30, help="循环模式最长等待秒数"
     )
     parser.add_argument(
-        "--email-mode", default=None, choices=["cf", "hotmail007", "file", "luckmail"],
-        help="邮箱模式: file=从accounts.txt读取, cf=Cloudflare自有域名, hotmail007=API拉取微软邮箱, luckmail=API拉取已购邮箱 (默认读.env EMAIL_MODE)"
+        "--email-mode",
+        default=None,
+        choices=["cf", "hotmail007", "file", "luckmail"],
+        help="邮箱模式: file=从accounts.txt读取, cf=Cloudflare自有域名, hotmail007=API拉取微软邮箱, luckmail=API拉取已购邮箱 (默认读.env EMAIL_MODE)",
     )
     parser.add_argument(
-        "--accounts-file", default=None,
-        help="邮箱列表文件路径 (每行一个邮箱)，配合 --email-mode file 使用 (默认 accounts.txt)"
-    )
-    parser.add_argument("--hotmail007-key", default=None, help="Hotmail007 API Key (覆盖.env)")
-    parser.add_argument(
-        "--hotmail007-type", default=None,
-        help="Hotmail007 邮箱类型，如 'outlook Trusted Graph' (覆盖.env)"
+        "--accounts-file",
+        default=None,
+        help="邮箱列表文件路径 (每行一个邮箱)，配合 --email-mode file 使用 (默认 accounts.txt)",
     )
     parser.add_argument(
-        "--hotmail007-mail-mode", default=None, choices=["graph", "imap"],
-        help="Hotmail007 收信模式: graph=Microsoft Graph API, imap=IMAP协议 (默认graph)"
+        "--hotmail007-key", default=None, help="Hotmail007 API Key (覆盖.env)"
     )
-    parser.add_argument("--luckmail-key", default=None, help="LuckMail API Key (覆盖.env)")
-    parser.add_argument("--luckmail-auto-buy", action="store_true", help="LuckMail 自动购买邮箱")
-    parser.add_argument("--luckmail-max-retry", type=int, default=None, help="LuckMail 购买邮箱时的最大重试次数 (默认3)")
+    parser.add_argument(
+        "--hotmail007-type",
+        default=None,
+        help="Hotmail007 邮箱类型，如 'outlook Trusted Graph' (覆盖.env)",
+    )
+    parser.add_argument(
+        "--hotmail007-mail-mode",
+        default=None,
+        choices=["graph", "imap"],
+        help="Hotmail007 收信模式: graph=Microsoft Graph API, imap=IMAP协议 (默认graph)",
+    )
+    parser.add_argument(
+        "--luckmail-key", default=None, help="LuckMail API Key (覆盖.env)"
+    )
+    parser.add_argument(
+        "--luckmail-auto-buy", action="store_true", help="LuckMail 自动购买邮箱"
+    )
+    parser.add_argument(
+        "--luckmail-max-retry",
+        type=int,
+        default=None,
+        help="LuckMail 购买邮箱时的最大重试次数 (默认3)",
+    )
     args = parser.parse_args()
 
     if args.email_mode:
@@ -2408,7 +2784,9 @@ def main() -> None:
     if EMAIL_MODE == "file":
         _email_queue = EmailQueue(ACCOUNTS_FILE)
         if len(_email_queue) == 0:
-            print(f"[Error] 邮箱文件 {ACCOUNTS_FILE} 为空或不存在，请先填入邮箱地址（一行一个）")
+            print(
+                f"[Error] 邮箱文件 {ACCOUNTS_FILE} 为空或不存在，请先填入邮箱地址（一行一个）"
+            )
             return
         print(f"[*] 从 {ACCOUNTS_FILE} 加载了 {len(_email_queue)} 个邮箱")
     if args.hotmail007_key:
@@ -2423,6 +2801,13 @@ def main() -> None:
         LUCKMAIL_AUTO_BUY = True
     if args.luckmail_max_retry is not None and args.luckmail_max_retry > 0:
         LUCKMAIL_MAX_RETRY = args.luckmail_max_retry
+
+    effective_resin_sticky = (
+        args.resin_sticky if args.resin_sticky is not None else RESIN_STICKY
+    )
+    effective_resin_platform = (
+        args.resin_platform if args.resin_platform else RESIN_PLATFORM
+    )
 
     proxy_file_path = args.proxy_file or PROXY_FILE
     proxy_list = _load_proxies(proxy_file_path)
@@ -2449,14 +2834,20 @@ def main() -> None:
         check_proxy = effective_single_proxy
         if not check_proxy and len(rotator) > 0:
             check_proxy = rotator.next()
-        proxies_dict = {"http": check_proxy, "https": check_proxy} if check_proxy else None
+        proxies_dict = (
+            {"http": check_proxy, "https": check_proxy} if check_proxy else None
+        )
         stats = check_codex_tokens(proxies=proxies_dict)
         valid_count = stats.get("valid", 0)
         if valid_count >= AUTO_REGISTER_THRESHOLD:
-            print(f"[*] 当前可用 token {valid_count} 个，已达到阈值 {AUTO_REGISTER_THRESHOLD}，不执行自动注册")
+            print(
+                f"[*] 当前可用 token {valid_count} 个，已达到阈值 {AUTO_REGISTER_THRESHOLD}，不执行自动注册"
+            )
             return
         need_count = AUTO_REGISTER_THRESHOLD - valid_count
-        print(f"[*] 当前可用 token {valid_count} 个，低于阈值 {AUTO_REGISTER_THRESHOLD}，开始自动注册，目标补足 {need_count} 个")
+        print(
+            f"[*] 当前可用 token {valid_count} 个，低于阈值 {AUTO_REGISTER_THRESHOLD}，开始自动注册，目标补足 {need_count} 个"
+        )
         batch_count = need_count
 
     sleep_min = max(1, args.sleep_min)
@@ -2493,7 +2884,11 @@ def main() -> None:
         check_proxy_str = effective_single_proxy
         if not check_proxy_str and len(rotator) > 0:
             check_proxy_str = rotator.next()
-        proxies_check = {"http": check_proxy_str, "https": check_proxy_str} if check_proxy_str else None
+        proxies_check = (
+            {"http": check_proxy_str, "https": check_proxy_str}
+            if check_proxy_str
+            else None
+        )
         bal, bal_err = hotmail007_get_balance(proxies=proxies_check)
         if bal is not None:
             print(f"  账户余额: {bal}")
@@ -2517,7 +2912,7 @@ def main() -> None:
         prefetch_thread = threading.Thread(
             target=_prefetch_active_emails,
             args=(rotator, 10, 20),  # 最小池大小10，批量购买20
-            daemon=True
+            daemon=True,
         )
         prefetch_thread.start()
         # 等待预检测线程准备第一批邮箱
@@ -2550,6 +2945,8 @@ def main() -> None:
                 count_target=batch_count,
                 remaining=remaining,
                 stop_event=stop_event,
+                resin_sticky=effective_resin_sticky,
+                resin_platform=effective_resin_platform,
             )
         else:
             print(f"[*] 启动 {actual_threads} 个并发线程...")
@@ -2557,8 +2954,18 @@ def main() -> None:
             for tid in range(1, actual_threads + 1):
                 t = threading.Thread(
                     target=_worker,
-                    args=(tid, rotator, effective_single_proxy, sleep_min, sleep_max,
-                          batch_count, remaining, stop_event),
+                    args=(
+                        tid,
+                        rotator,
+                        effective_single_proxy,
+                        sleep_min,
+                        sleep_max,
+                        batch_count,
+                        remaining,
+                        stop_event,
+                        effective_resin_sticky,
+                        effective_resin_platform,
+                    ),
                     daemon=True,
                 )
                 threads.append(t)
@@ -2590,6 +2997,8 @@ def main() -> None:
                     count_target=None,
                     remaining=None,
                     stop_event=stop_event,
+                    resin_sticky=effective_resin_sticky,
+                    resin_platform=effective_resin_platform,
                 )
             except KeyboardInterrupt:
                 print("\n[*] 收到中断信号，停止运行")
@@ -2599,8 +3008,18 @@ def main() -> None:
             for tid in range(1, thread_count + 1):
                 t = threading.Thread(
                     target=_worker,
-                    args=(tid, rotator, effective_single_proxy, sleep_min, sleep_max,
-                          None, None, stop_event),
+                    args=(
+                        tid,
+                        rotator,
+                        effective_single_proxy,
+                        sleep_min,
+                        sleep_max,
+                        None,
+                        None,
+                        stop_event,
+                        effective_resin_sticky,
+                        effective_resin_platform,
+                    ),
                     daemon=True,
                 )
                 threads.append(t)
