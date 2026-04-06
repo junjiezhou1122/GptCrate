@@ -3098,6 +3098,10 @@ def main() -> None:
 
     effective_single_proxy = args.proxy or SINGLE_PROXY or None
 
+    # 如果配置了 RESIN_URL 且启用粘性代理，使用 RESIN_URL 作为代理
+    if effective_resin_sticky and RESIN_URL:
+        effective_single_proxy = RESIN_URL
+
     effective_resin_sticky = (
         args.resin_sticky if args.resin_sticky is not None else RESIN_STICKY
     )
