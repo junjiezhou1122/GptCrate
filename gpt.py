@@ -31,11 +31,12 @@ from curl_cffi import requests
 def _build_resin_proxy(resin_url: str, platform: str, account: str) -> str:
     """将 Resin 网关地址转换为粘性代理 URL (V1 格式: Platform.Account:token@host:port)"""
     parsed = urllib.parse.urlparse(resin_url)
-    token = parsed.password or ""
+    token = parsed.username or parsed.password or ""
     host = parsed.hostname or ""
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    auth = f"{platform}.{account}:{token}"
-    return f"{parsed.scheme}://{auth}@{host}:{port}"
+    username = urllib.parse.quote(f"{platform}.{account}", safe="")
+    password = urllib.parse.quote(token, safe="")
+    return f"{parsed.scheme}://{username}:{password}@{host}:{port}"
 
 
 # ==========================================
@@ -364,6 +365,7 @@ def _skip_net_check() -> bool:
 
 def _prefetch_active_emails(
     rotator: ProxyRotator,
+    single_proxy: Optional[str] = None,
     min_pool_size: int = 10,
     batch_size: int = 20,
     resin_sticky: bool = False,
@@ -391,14 +393,15 @@ def _prefetch_active_emails(
 
         # 构建 Resin 粘性代理（如果有配置）
         effective_proxy = None
-        if resin_sticky and RESIN_URL:
+        resin_proxy_source = single_proxy or RESIN_URL
+        if resin_sticky and resin_proxy_source:
             resin_account = secrets.token_hex(6)
             effective_proxy = _build_resin_proxy(
-                RESIN_URL, resin_platform, resin_account
+                resin_proxy_source, resin_platform, resin_account
             )
             print(f"[*] [预检测] 使用 Resin 粘性代理: {resin_account}")
         else:
-            proxy = rotator.next() if len(rotator) > 0 else None
+            proxy = rotator.next() if len(rotator) > 0 else single_proxy
             effective_proxy = proxy
 
         proxies = (
@@ -1804,7 +1807,12 @@ def _to_int(v: Any) -> int:
         return 0
 
 
-def _post_form(url: str, data: Dict[str, str], timeout: int = 30) -> Dict[str, Any]:
+def _post_form(
+    url: str,
+    data: Dict[str, str],
+    timeout: int = 30,
+    proxies: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
     body = urllib.parse.urlencode(data).encode("utf-8")
     req = urllib.request.Request(
         url,
@@ -1819,13 +1827,25 @@ def _post_form(url: str, data: Dict[str, str], timeout: int = 30) -> Dict[str, A
         context = None
         if not _ssl_verify():
             context = ssl._create_unverified_context()
-        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
-            raw = resp.read()
-            if resp.status != 200:
-                raise RuntimeError(
-                    f"token exchange failed: {resp.status}: {raw.decode('utf-8', 'replace')}"
-                )
-            return json.loads(raw.decode("utf-8"))
+
+        if proxies:
+            proxy_handler = urllib.request.ProxyHandler(proxies)
+            opener = urllib.request.build_opener(proxy_handler)
+            with opener.open(req, timeout=timeout, context=context) as resp:
+                raw = resp.read()
+                if resp.status != 200:
+                    raise RuntimeError(
+                        f"token exchange failed: {resp.status}: {raw.decode('utf-8', 'replace')}"
+                    )
+                return json.loads(raw.decode("utf-8"))
+        else:
+            with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
+                raw = resp.read()
+                if resp.status != 200:
+                    raise RuntimeError(
+                        f"token exchange failed: {resp.status}: {raw.decode('utf-8', 'replace')}"
+                    )
+                return json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as exc:
         raw = exc.read()
         raise RuntimeError(
@@ -1916,6 +1936,7 @@ def submit_callback_url(
     expected_state: str,
     code_verifier: str,
     redirect_uri: str = DEFAULT_REDIRECT_URI,
+    proxies: Optional[Dict[str, str]] = None,
 ) -> str:
     cb = _parse_callback_url(callback_url)
     if cb["error"]:
@@ -1938,6 +1959,7 @@ def submit_callback_url(
             "redirect_uri": redirect_uri,
             "code_verifier": code_verifier,
         },
+        proxies=proxies,
     )
 
     access_token = (token_resp.get("access_token") or "").strip()
@@ -2540,6 +2562,7 @@ def run(
                     code_verifier=oauth.code_verifier,
                     redirect_uri=oauth.redirect_uri,
                     expected_state=oauth.state,
+                    proxies=proxies,
                 )
                 return token_json, password, email
             current_url = next_url
@@ -2903,8 +2926,17 @@ def _worker(
         proxy_str = rotator.next() if len(rotator) > 0 else single_proxy
         tag = f"[T{worker_id}#{local_round}]"
 
+        # 脱敏代理凭证
+        display_proxy = proxy_str
+        if proxy_str:
+            parsed = urllib.parse.urlsplit(proxy_str)
+            if parsed.username is not None:
+                host = parsed.hostname or ""
+                port = f":{parsed.port}" if parsed.port else ""
+                display_proxy = f"{parsed.scheme}://***@{host}{port}"
+
         _print_with_stats_clear(
-            f"[{datetime.now().strftime('%H:%M:%S')}] 开始注册 (代理: {proxy_str or '直连'})",
+            f"[{datetime.now().strftime('%H:%M:%S')}] 开始注册 (代理: {display_proxy or '直连'})",
             "",
         )
 
@@ -2991,8 +3023,10 @@ def main() -> None:
         HOTMAIL007_MAIL_TYPE, \
         HOTMAIL007_MAIL_MODE, \
         _email_queue, \
+        ACCOUNTS_FILE, \
         LUCKMAIL_API_KEY, \
         LUCKMAIL_AUTO_BUY, \
+        LUCKMAIL_MAX_RETRY, \
         LUCKMAIL_PURCHASED_ONLY, \
         LUCKMAIL_SKIP_PURCHASED
 
@@ -3110,14 +3144,15 @@ def main() -> None:
         args.resin_platform if args.resin_platform else RESIN_PLATFORM
     )
 
+    # 先处理 CLI 参数
+    effective_single_proxy = args.proxy or SINGLE_PROXY or None
+
     # 如果配置了 RESIN_URL 且启用粘性代理，使用 RESIN_URL 作为代理，清空 rotator
     if effective_resin_sticky and RESIN_URL:
         effective_single_proxy = RESIN_URL
         proxy_list = []  # 清空代理列表，使用 RESIN_URL
 
     rotator = ProxyRotator(proxy_list)
-
-    effective_single_proxy = args.proxy or SINGLE_PROXY or None
 
     thread_count = args.threads
     if BATCH_THREADS and thread_count == 1:
@@ -3224,7 +3259,14 @@ def main() -> None:
             _active_email_queue = ActiveEmailQueue()
         prefetch_thread = threading.Thread(
             target=_prefetch_active_emails,
-            args=(rotator, 10, 20, effective_resin_sticky, effective_resin_platform),
+            args=(
+                rotator,
+                effective_single_proxy,
+                10,
+                20,
+                effective_resin_sticky,
+                effective_resin_platform,
+            ),
             daemon=True,
         )
         prefetch_thread.start()

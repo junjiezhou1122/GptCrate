@@ -330,12 +330,6 @@ uv run python gpt.py --proxy http://token@resin-host:2260 --resin-sticky --resin
 uv run python gpt.py --check --proxy-file proxies.txt
 ```
 
-### 8. 检测已有 token + 自动补注册
-
-```bash
-uv run python gpt.py --check --proxy-file proxies.txt
-```
-
 先扫描 `CLI_PROXY_AUTHS_DIR` 下的 token 文件，刷新过期的、删除无效的，可用数低于阈值 (默认 10) 时自动补注册。
 
 ### 9. 无限循环模式 (持续注册)
