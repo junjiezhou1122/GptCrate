@@ -24,8 +24,21 @@ import urllib.parse
 import ssl
 import urllib.request
 import urllib.error
+import urllib.parse
 
 from curl_cffi import requests
+
+
+def _redact_proxy(proxy_str: str) -> str:
+    """脱敏代理凭证"""
+    if not proxy_str:
+        return "直连"
+    parsed = urllib.parse.urlsplit(proxy_str)
+    if parsed.username is not None:
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme}://***@{host}{port}"
+    return proxy_str
 
 
 def _build_resin_proxy(resin_url: str, platform: str, account: str) -> str:
@@ -435,14 +448,15 @@ def _prefetch_active_emails(
                 )
                 print(f"{'=' * 50}")
 
-                proxy = rotator.next() if len(rotator) > 0 else None
+                proxy = rotator.next() if len(rotator) > 0 else single_proxy
 
                 # 构建 Resin 粘性代理
                 effective_proxy = None
-                if resin_sticky and RESIN_URL:
+                resin_proxy_source = single_proxy or RESIN_URL
+                if resin_sticky and resin_proxy_source:
                     resin_account = secrets.token_hex(6)
                     effective_proxy = _build_resin_proxy(
-                        RESIN_URL, resin_platform, resin_account
+                        resin_proxy_source, resin_platform, resin_account
                     )
                     print(f"[*] [预检测] 使用 Resin 粘性代理: {resin_account}")
                 elif proxy:
@@ -1697,11 +1711,20 @@ def _outlook_fetch_otp(
     proxies: Any = None,
     timeout: int = 120,
 ) -> str:
+    global HOTMAIL007_MAIL_MODE
     if known_ids is None:
         known_ids = set()
-    return _outlook_fetch_otp_graph(
-        email_addr, client_id, refresh_token, known_ids, proxies, timeout
-    )
+
+    mail_mode = HOTMAIL007_MAIL_MODE.lower() if HOTMAIL007_MAIL_MODE else "graph"
+
+    if mail_mode == "imap":
+        return _outlook_fetch_otp_imap(
+            email_addr, client_id, refresh_token, known_ids, proxies, timeout
+        )
+    else:
+        return _outlook_fetch_otp_graph(
+            email_addr, client_id, refresh_token, known_ids, proxies, timeout
+        )
 
 
 # ==========================================
@@ -1830,8 +1853,11 @@ def _post_form(
 
         if proxies:
             proxy_handler = urllib.request.ProxyHandler(proxies)
-            opener = urllib.request.build_opener(proxy_handler)
-            with opener.open(req, timeout=timeout, context=context) as resp:
+            handlers = [proxy_handler]
+            if context is not None:
+                handlers.append(urllib.request.HTTPSHandler(context=context))
+            opener = urllib.request.build_opener(*handlers)
+            with opener.open(req, timeout=timeout) as resp:
                 raw = resp.read()
                 if resp.status != 200:
                     raise RuntimeError(
@@ -2927,13 +2953,7 @@ def _worker(
         tag = f"[T{worker_id}#{local_round}]"
 
         # 脱敏代理凭证
-        display_proxy = proxy_str
-        if proxy_str:
-            parsed = urllib.parse.urlsplit(proxy_str)
-            if parsed.username is not None:
-                host = parsed.hostname or ""
-                port = f":{parsed.port}" if parsed.port else ""
-                display_proxy = f"{parsed.scheme}://***@{host}{port}"
+        display_proxy = _redact_proxy(proxy_str)
 
         _print_with_stats_clear(
             f"[{datetime.now().strftime('%H:%M:%S')}] 开始注册 (代理: {display_proxy or '直连'})",
@@ -3210,7 +3230,7 @@ def main() -> None:
     if len(rotator) > 0:
         print(f"  代理模式: 文件轮换 ({len(rotator)} 个代理)")
     elif effective_single_proxy:
-        print(f"  代理模式: 单代理 ({effective_single_proxy})")
+        print(f"  代理模式: 单代理 ({_redact_proxy(effective_single_proxy)})")
     else:
         print(f"  代理模式: 直连 (未配置代理)")
     if batch_count:
