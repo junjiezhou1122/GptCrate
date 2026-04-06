@@ -10,9 +10,22 @@ import string
 import secrets
 import hashlib
 import base64
+import threading
+import argparse
+import concurrent.futures
+from datetime import datetime, timezone, timedelta
+from urllib.parse import urlparse, parse_qs, urlencode, quote
+from dataclasses import dataclass
+from typing import Any, Dict, Optional, List
+import secrets
+import hashlib
+import base64
 import urllib.parse
+import ssl
 import urllib.request
 import urllib.error
+
+from curl_cffi import requests
 
 
 def _build_resin_proxy(resin_url: str, platform: str, account: str) -> str:
@@ -24,20 +37,6 @@ def _build_resin_proxy(resin_url: str, platform: str, account: str) -> str:
     auth = f"{platform}.{account}:{token}"
     return f"{parsed.scheme}://{auth}@{host}:{port}"
 
-
-import threading
-import argparse
-import concurrent.futures
-from datetime import datetime, timezone, timedelta
-from urllib.parse import urlparse, parse_qs, urlencode, quote
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, List
-import urllib.parse
-import ssl
-import urllib.request
-import urllib.error
-
-from curl_cffi import requests
 
 # ==========================================
 # Cloudflare Temp Email API
@@ -98,6 +97,12 @@ LUCKMAIL_API_URL = os.getenv(
     "LUCKMAIL_API_URL", "https://mails.luckyous.com/api/v1/openapi"
 ).rstrip("/")
 LUCKMAIL_AUTO_BUY = os.getenv("LUCKMAIL_AUTO_BUY", "true").strip().lower() == "true"
+LUCKMAIL_PURCHASED_ONLY = (
+    os.getenv("LUCKMAIL_PURCHASED_ONLY", "false").strip().lower() == "true"
+)
+LUCKMAIL_SKIP_PURCHASED = (
+    os.getenv("LUCKMAIL_SKIP_PURCHASED", "false").strip().lower() == "true"
+)
 LUCKMAIL_EMAIL_TYPE = os.getenv("LUCKMAIL_EMAIL_TYPE", "ms_imap").strip().lower()
 try:
     LUCKMAIL_MAX_RETRY = int(os.getenv("LUCKMAIL_MAX_RETRY", "3").strip())
@@ -192,6 +197,131 @@ _email_queue: Optional[EmailQueue] = None
 _prefetch_no_stock = False  # 是否无库存
 _prefetch_lock = threading.Lock()
 
+# 已购邮箱模式标志（只使用已购邮箱，不购买新邮箱）
+_luckmail_purchased_only = False
+
+# 跳过已购邮箱标志（预检测模式用：只购买新邮箱，不使用已购邮箱）
+_luckmail_skip_purchased = False
+
+
+class RegistrationStats:
+    """注册统计类，实时跟踪注册情况"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.start_time = time.time()
+        self.total_attempts = 0
+        self.success_count = 0
+        self.fail_count = 0
+        self.fail_reasons = {
+            "403_forbidden": 0,
+            "signup_form_error": 0,
+            "password_error": 0,
+            "otp_timeout": 0,
+            "account_create_error": 0,
+            "callback_error": 0,
+            "network_error": 0,
+            "other_error": 0,
+        }
+        self.last_10_results = []  # 最近10次结果用于计算实时成功率
+
+    def add_attempt(self):
+        with self._lock:
+            self.total_attempts += 1
+
+    def add_success(self):
+        with self._lock:
+            self.success_count += 1
+            self.last_10_results.append(True)
+            if len(self.last_10_results) > 10:
+                self.last_10_results.pop(0)
+
+    def add_failure(self, reason: str = "other_error"):
+        with self._lock:
+            self.fail_count += 1
+            if reason in self.fail_reasons:
+                self.fail_reasons[reason] += 1
+            else:
+                self.fail_reasons["other_error"] += 1
+            self.last_10_results.append(False)
+            if len(self.last_10_results) > 10:
+                self.last_10_results.pop(0)
+
+    def get_stats(self) -> dict:
+        with self._lock:
+            elapsed = time.time() - self.start_time
+            total = self.success_count + self.fail_count
+            overall_rate = (self.success_count / total * 100) if total > 0 else 0
+            recent_rate = (
+                (sum(self.last_10_results) / len(self.last_10_results) * 100)
+                if self.last_10_results
+                else 0
+            )
+            speed = (
+                self.success_count / (elapsed / 3600) if elapsed > 0 else 0
+            )  # 每小时成功数
+
+            return {
+                "elapsed_time": elapsed,
+                "total_attempts": self.total_attempts,
+                "success_count": self.success_count,
+                "fail_count": self.fail_count,
+                "overall_success_rate": overall_rate,
+                "recent_success_rate": recent_rate,
+                "speed_per_hour": speed,
+                "fail_reasons": self.fail_reasons.copy(),
+            }
+
+    def format_display(self) -> str:
+        stats = self.get_stats()
+        elapsed = stats["elapsed_time"]
+        hours = int(elapsed // 3600)
+        minutes = int((elapsed % 3600) // 60)
+        seconds = int(elapsed % 60)
+
+        lines = [
+            "",
+            "=" * 60,
+            " 📊 注册统计面板",
+            "=" * 60,
+            f" ⏱️  运行时间: {hours:02d}:{minutes:02d}:{seconds:02d}",
+            f" 📈 总尝试数: {stats['total_attempts']}",
+            f" ✅ 成功: {stats['success_count']} | ❌ 失败: {stats['fail_count']}",
+            f" 📊 总体成功率: {stats['overall_success_rate']:.1f}%",
+            f" 📊 最近10次成功率: {stats['recent_success_rate']:.1f}%",
+            f" 🚀 速度: {stats['speed_per_hour']:.1f} 个/小时",
+            "-" * 60,
+            " 📉 失败原因分布:",
+        ]
+
+        for reason, count in stats["fail_reasons"].items():
+            if count > 0:
+                lines.append(f"    • {reason}: {count}")
+
+        lines.append("=" * 60)
+        return "\n".join(lines)
+
+    def format_compact(self) -> str:
+        """紧凑1行格式，适合固定在底部显示"""
+        stats = self.get_stats()
+        elapsed = stats["elapsed_time"]
+        hours = int(elapsed // 3600)
+        minutes = int((elapsed % 3600) // 60)
+        seconds = int(elapsed % 60)
+
+        return (
+            f"\r\033[K[⏱️{hours:02d}:{minutes:02d}:{seconds:02d}] "
+            f"[尝试:{stats['total_attempts']}] "
+            f"[✅{stats['success_count']}|❌{stats['fail_count']}] "
+            f"[总率:{stats['overall_success_rate']:.1f}%] "
+            f"[近10次:{stats['recent_success_rate']:.1f}%] "
+            f"[🚀{stats['speed_per_hour']:.1f}/h]"
+        )
+
+
+# 全局统计对象
+_reg_stats: Optional[RegistrationStats] = None
+
 
 class ActiveEmailQueue:
     """线程安全的活跃邮箱队列，存储预检测的活跃邮箱"""
@@ -237,21 +367,39 @@ def _prefetch_active_emails(
 ):
     """后台线程：预检测邮箱池补充
     当活跃邮箱数量低于 min_pool_size 时，优先检查已购邮箱，不足时批量购买
+    如果 _luckmail_purchased_only=True，则只使用已购邮箱，不购买新邮箱
+    如果 _luckmail_skip_purchased=True，则跳过已购邮箱检查，直接购买新邮箱
     """
-    global _active_email_queue, _prefetch_no_stock
+    global \
+        _active_email_queue, \
+        _prefetch_no_stock, \
+        _luckmail_purchased_only, \
+        _luckmail_skip_purchased
     if _active_email_queue is None:
         _active_email_queue = ActiveEmailQueue()
 
-    # 首先检查已购邮箱
-    print(f"\n[*] [预检测] 首先检查已购邮箱...")
-    proxy = rotator.next() if len(rotator) > 0 else None
-    proxies = {"http": proxy, "https": proxy} if proxy else None
-    purchased_active = luckmail_check_purchased_emails(proxies=proxies, max_workers=5)
-    if purchased_active:
-        _active_email_queue.add_batch(purchased_active)
-        print(
-            f"[*] [预检测] ✓ 已从已购邮箱中添加 {len(purchased_active)} 个活跃邮箱 | 队列: {len(_active_email_queue)} 个"
+    # 检查是否跳过已购邮箱
+    if _luckmail_skip_purchased:
+        print(f"\n[*] [预检测] 跳过已购邮箱检查，直接购买新邮箱...")
+    else:
+        # 首先检查已购邮箱
+        print(f"\n[*] [预检测] 首先检查已购邮箱...")
+        proxy = rotator.next() if len(rotator) > 0 else None
+        proxies = {"http": proxy, "https": proxy} if proxy else None
+        purchased_active = luckmail_check_purchased_emails(
+            proxies=proxies, max_workers=5
         )
+        if purchased_active:
+            _active_email_queue.add_batch(purchased_active)
+            print(
+                f"[*] [预检测] ✓ 已从已购邮箱中添加 {len(purchased_active)} 个活跃邮箱 | 队列: {len(_active_email_queue)} 个"
+            )
+
+    # 如果只使用已购邮箱模式，检测完成后退出
+    if _luckmail_purchased_only:
+        print(f"[*] [预检测] 已购邮箱模式：只使用已购邮箱，不购买新邮箱")
+        print(f"[*] [预检测] 预检测线程退出")
+        return
 
     while True:
         try:
@@ -361,7 +509,7 @@ def get_email_and_token(proxies: Any = None) -> tuple:
             return email, email
 
         # 检查是否有预检测的活跃邮箱队列
-        global _active_email_queue
+        global _active_email_queue, _luckmail_purchased_only
         if _active_email_queue is not None and not _active_email_queue.is_empty():
             email_data = _active_email_queue.pop()
             if email_data:
@@ -377,6 +525,11 @@ def get_email_and_token(proxies: Any = None) -> tuple:
                     "email_data": email_data,
                 }
                 return email, email
+
+        # 如果只使用已购邮箱模式，且队列已空，直接返回失败
+        if _luckmail_purchased_only:
+            print(f"[*] 已购邮箱已用完，停止注册")
+            return "", ""
 
         # 自动购买模式：购买 -> 检测活跃度 -> 使用
         max_retries = LUCKMAIL_MAX_RETRY
@@ -967,10 +1120,47 @@ def luckmail_get_purchased_emails(
 
         if data.get("code") == 0:
             mails = data.get("data", {}).get("list", [])
-            return mails, None
-        return [], data.get("message", "获取已购邮箱失败")
+            total = data.get("data", {}).get("total", 0)
+            return mails, None, total
+        return [], data.get("message", "获取已购邮箱失败"), 0
     except Exception as e:
-        return [], f"获取已购邮箱异常: {e}"
+        return [], f"获取已购邮箱异常: {e}", 0
+
+
+def luckmail_get_all_purchased_emails(
+    proxies: Any = None, user_disabled: int = 0
+) -> tuple:
+    """获取所有已购邮箱（自动分页）
+    user_disabled: 0=正常(非禁用), 1=已禁用
+    返回: (邮箱列表, 错误信息)
+    """
+    all_mails = []
+    page = 1
+    page_size = 50
+
+    while True:
+        mails, err, total = luckmail_get_purchased_emails(
+            proxies=proxies, page=page, page_size=page_size, user_disabled=user_disabled
+        )
+        if err:
+            return all_mails, err
+
+        if not mails:
+            break
+
+        all_mails.extend(mails)
+
+        # 如果已经获取完所有邮箱，退出循环
+        if len(all_mails) >= total:
+            break
+
+        # 如果本次获取的数量少于page_size，说明已经是最后一页
+        if len(mails) < page_size:
+            break
+
+        page += 1
+
+    return all_mails, None
 
 
 def luckmail_check_purchased_emails(proxies: Any = None, max_workers: int = 5) -> list:
@@ -978,7 +1168,7 @@ def luckmail_check_purchased_emails(proxies: Any = None, max_workers: int = 5) -
     只检查非禁用的邮箱，不活跃的自动禁用
     """
     print(f"[*] 获取已购邮箱列表...")
-    mails, err = luckmail_get_purchased_emails(proxies=proxies, user_disabled=0)
+    mails, err = luckmail_get_all_purchased_emails(proxies=proxies, user_disabled=0)
     if err:
         print(f"[Error] 获取已购邮箱失败: {err}")
         return []
@@ -1826,6 +2016,11 @@ def _generate_password(length: int = 16) -> str:
 def run(
     proxy: Optional[str], resin_sticky: bool = False, resin_platform: str = "Default"
 ) -> tuple:
+    """运行注册流程，返回 (token_json, password, email, fail_reason)
+    失败时返回 (None/特殊标记, None, email, fail_reason)
+    fail_reason: 403_forbidden, signup_form_error, password_error, otp_timeout,
+                 account_create_error, callback_error, network_error, other_error
+    """
     resin_account = secrets.token_hex(6) if resin_sticky else ""
     effective_proxy = proxy
     if resin_sticky and proxy:
@@ -1856,11 +2051,11 @@ def run(
                 raise RuntimeError("检查代理哦w - 所在地不支持")
         except Exception as e:
             print(f"[Error] 网络连接检查失败: {e}")
-            return None, None
+            return None, None, None, "network_error"
 
     email, dev_token = get_email_and_token(proxies)
     if not email or not dev_token:
-        return None, None
+        return None, None, email, "other_error"
     print(f"[*] 成功获取临时邮箱与授权: {email}")
     masked = dev_token[:8] + "..." if dev_token else ""
     print(f"[*] 临时邮箱 JWT: {masked}")
@@ -1914,11 +2109,11 @@ def run(
 
         if signup_status == 403:
             print("[Error] 提交注册表单返回 403，中断本次运行，将在10秒后重试...")
-            return "retry_403", None
+            return "retry_403", None, email, "403_forbidden"
         if signup_status != 200:
             print("[Error] 提交注册表单失败，跳过本次流程")
             print(signup_resp.text)
-            return None, None
+            return None, None, email, "signup_form_error"
 
         password = _generate_password()
         register_body = json.dumps({"password": password, "username": email})
@@ -1939,7 +2134,7 @@ def run(
         print(f"[*] 提交注册(密码)状态: {pwd_resp.status_code}")
         if pwd_resp.status_code != 200:
             print(pwd_resp.text)
-            return None, None
+            return None, None, email, "password_error"
 
         try:
             register_json = pwd_resp.json()
@@ -2015,7 +2210,7 @@ def run(
                     break
             if not code:
                 print("[Error] 多次重试后仍未收到验证码，跳过")
-                return None, None
+                return None, None, email
 
             print("[*] 开始校验验证码...")
             code_resp = _post_with_retry(
@@ -2058,7 +2253,7 @@ def run(
 
         if create_account_status != 200:
             print(create_account_resp.text)
-            return None, None
+            return None, None, email
 
         print("[*] 账户创建完毕，执行静默重登录...")
         s.cookies.clear()
@@ -2150,7 +2345,7 @@ def run(
                             break
                     if not code2:
                         print("[Error] 二次验证码获取失败")
-                        return None, None
+                        return None, None, email
                     code2_resp = _post_with_retry(
                         s,
                         "https://auth.openai.com/api/accounts/email-otp/validate",
@@ -2164,14 +2359,14 @@ def run(
                     print(f"[*] 二次验证码校验状态: {code2_resp.status_code}")
                     if code2_resp.status_code != 200:
                         print(code2_resp.text)
-                        return None, None
+                        return None, None, email
             except Exception:
                 pass
 
         auth_cookie = s.cookies.get("oai-client-auth-session")
         if not auth_cookie:
             print("[Error] 重登录后未能获取授权 Cookie")
-            return None, None
+            return None, None, email
 
         auth_json = {}
         raw_val = auth_cookie.strip()
@@ -2190,11 +2385,11 @@ def run(
         workspaces = auth_json.get("workspaces") or []
         if not workspaces:
             print("[Error] 重登录后 Cookie 里仍没有 workspace 信息")
-            return None, None
+            return None, None, email
         workspace_id = str((workspaces[0] or {}).get("id") or "").strip()
         if not workspace_id:
             print("[Error] 无法解析 workspace_id")
-            return None, None
+            return None, None, email
 
         select_body = f'{{"workspace_id":"{workspace_id}"}}'
         print("[*] 开始选择 workspace...")
@@ -2214,12 +2409,12 @@ def run(
         if select_resp.status_code != 200:
             print(f"[Error] 选择 workspace 失败，状态码: {select_resp.status_code}")
             print(select_resp.text)
-            return None, None
+            return None, None, email
 
         continue_url = str((select_resp.json() or {}).get("continue_url") or "").strip()
         if not continue_url:
             print("[Error] workspace/select 响应里缺少 continue_url")
-            return None, None
+            return None, None, email
 
         try:
             select_data = select_resp.json()
@@ -2310,16 +2505,16 @@ def run(
                     redirect_uri=oauth.redirect_uri,
                     expected_state=oauth.state,
                 )
-                return token_json, password
+                return token_json, password, email
             current_url = next_url
             time.sleep(0.5)
 
         print("[Error] 未能在重定向链中捕获到最终 Callback URL")
-        return None, None
+        return None, None, email
 
     except Exception as e:
         print(f"[Error] 运行时发生错误: {e}")
-        return None, None
+        return None, None, email
 
 
 # ==========================================
@@ -2553,6 +2748,37 @@ _success_counter_lock = threading.Lock()
 _success_counter = 0
 
 
+def _disable_email_on_failure(email: str, tag: str = "") -> None:
+    """注册失败时禁用邮箱"""
+    global _luckmail_credentials
+    creds = _luckmail_credentials.get(email)
+    if creds and "purchase_id" in creds:
+        purchase_id = creds["purchase_id"]
+        try:
+            if luckmail_disable_email(purchase_id, disabled=True):
+                print(f"{tag} [*] 注册失败，已禁用邮箱: {email}")
+            else:
+                print(f"{tag} [Warning] 禁用邮箱失败: {email}")
+        except Exception as e:
+            print(f"{tag} [Warning] 禁用邮箱时出错: {email}, {e}")
+    else:
+        # 如果本地没有凭据，尝试从已购邮箱列表中查找
+        try:
+            mails, err = luckmail_get_all_purchased_emails(user_disabled=0)
+            if not err and mails:
+                for mail in mails:
+                    if mail.get("email_address") == email:
+                        purchase_id = mail.get("id")
+                        if purchase_id:
+                            if luckmail_disable_email(purchase_id, disabled=True):
+                                print(f"{tag} [*] 注册失败，已禁用邮箱: {email}")
+                            else:
+                                print(f"{tag} [Warning] 禁用邮箱失败: {email}")
+                        break
+        except Exception as e:
+            print(f"{tag} [Warning] 查找并禁用邮箱时出错: {email}, {e}")
+
+
 def _save_result(token_json: str, password: str, proxy_str: Optional[str]) -> None:
     """线程安全地保存注册结果"""
     try:
@@ -2601,6 +2827,14 @@ def _save_result(token_json: str, password: str, proxy_str: Optional[str]) -> No
         delete_temp_email(account_email, proxies=proxies_cleanup)
 
 
+def _print_with_stats_clear(message: str, tag: str = ""):
+    """打印消息（统计行固定在底部，不需要清除）"""
+    if tag:
+        print(f"{tag} {message}")
+    else:
+        print(message)
+
+
 def _worker(
     worker_id: int,
     rotator: ProxyRotator,
@@ -2620,7 +2854,7 @@ def _worker(
 
     while not stop_event.is_set():
         if EMAIL_MODE == "file" and _email_queue is not None and len(_email_queue) == 0:
-            print(f"[T{worker_id}] 邮箱队列已用完，停止线程")
+            _print_with_stats_clear(f"[T{worker_id}] 邮箱队列已用完，停止线程")
             break
 
         if remaining is not None:
@@ -2633,17 +2867,31 @@ def _worker(
         proxy_str = rotator.next() if len(rotator) > 0 else single_proxy
         tag = f"[T{worker_id}#{local_round}]"
 
-        print(
-            f"\n{tag} [{datetime.now().strftime('%H:%M:%S')}] 开始注册 (代理: {proxy_str or '直连'})"
+        _print_with_stats_clear(
+            f"[{datetime.now().strftime('%H:%M:%S')}] 开始注册 (代理: {proxy_str or '直连'})",
+            "",
         )
 
+        email_used = None
+        fail_reason = None
         try:
-            token_json, password = run(
+            # 记录尝试
+            global _reg_stats
+            if _reg_stats:
+                _reg_stats.add_attempt()
+
+            result = run(
                 proxy_str, resin_sticky=resin_sticky, resin_platform=resin_platform
             )
+            token_json = result[0] if result else None
+            password = result[1] if result else None
+            email_used = result[2] if len(result) > 2 else None
+            fail_reason = result[3] if len(result) > 3 else "other_error"
 
             if token_json == "retry_403":
-                print(f"{tag} 检测到 403，等待10秒后重试...")
+                _print_with_stats_clear("检测到 403，等待10秒后重试...", tag)
+                if _reg_stats:
+                    _reg_stats.add_failure("403_forbidden")
                 if remaining is not None:
                     with _success_counter_lock:
                         remaining[0] += 1
@@ -2655,19 +2903,31 @@ def _worker(
                 local_success += 1
                 with _success_counter_lock:
                     _success_counter += 1
-                print(f"{tag} 注册成功! (本线程累计: {local_success})")
+                if _reg_stats:
+                    _reg_stats.add_success()
+                _print_with_stats_clear(f"注册成功! (本线程累计: {local_success})", tag)
             else:
-                print(f"{tag} 本次注册失败")
+                _print_with_stats_clear("本次注册失败", tag)
+                if _reg_stats:
+                    _reg_stats.add_failure(fail_reason or "other_error")
+                # 注册失败时禁用邮箱
+                if EMAIL_MODE == "luckmail" and email_used:
+                    _disable_email_on_failure(email_used, tag)
                 if (
                     EMAIL_MODE == "file"
                     and _email_queue is not None
                     and len(_email_queue) == 0
                 ):
-                    print(f"{tag} 邮箱队列已用完，停止线程")
+                    _print_with_stats_clear("邮箱队列已用完，停止线程", tag)
                     break
 
         except Exception as e:
-            print(f"{tag} [Error] 未捕获异常: {e}")
+            _print_with_stats_clear(f"[Error] 未捕获异常: {e}", tag)
+            if _reg_stats:
+                _reg_stats.add_failure("other_error")
+            # 异常时也尝试禁用邮箱
+            if EMAIL_MODE == "luckmail" and email_used:
+                _disable_email_on_failure(email_used, tag)
 
         if count_target == 1 and remaining is None:
             break
@@ -2679,7 +2939,7 @@ def _worker(
 
         if not stop_event.is_set():
             wait_time = random.randint(sleep_min, sleep_max)
-            print(f"{tag} 休息 {wait_time} 秒...")
+            _print_with_stats_clear(f"休息 {wait_time} 秒...", tag)
             for _ in range(wait_time):
                 if stop_event.is_set():
                     break
@@ -2696,7 +2956,9 @@ def main() -> None:
         HOTMAIL007_MAIL_MODE, \
         _email_queue, \
         LUCKMAIL_API_KEY, \
-        LUCKMAIL_AUTO_BUY
+        LUCKMAIL_AUTO_BUY, \
+        LUCKMAIL_PURCHASED_ONLY, \
+        LUCKMAIL_SKIP_PURCHASED
 
     parser = argparse.ArgumentParser(description="OpenAI 自动注册脚本")
     parser.add_argument(
@@ -2802,18 +3064,18 @@ def main() -> None:
     if args.luckmail_max_retry is not None and args.luckmail_max_retry > 0:
         LUCKMAIL_MAX_RETRY = args.luckmail_max_retry
 
+    proxy_file_path = args.proxy_file or PROXY_FILE
+    proxy_list = _load_proxies(proxy_file_path)
+    rotator = ProxyRotator(proxy_list)
+
+    effective_single_proxy = args.proxy or SINGLE_PROXY or None
+
     effective_resin_sticky = (
         args.resin_sticky if args.resin_sticky is not None else RESIN_STICKY
     )
     effective_resin_platform = (
         args.resin_platform if args.resin_platform else RESIN_PLATFORM
     )
-
-    proxy_file_path = args.proxy_file or PROXY_FILE
-    proxy_list = _load_proxies(proxy_file_path)
-    rotator = ProxyRotator(proxy_list)
-
-    effective_single_proxy = args.proxy or SINGLE_PROXY or None
 
     thread_count = args.threads
     if BATCH_THREADS and thread_count == 1:
@@ -2905,6 +3167,15 @@ def main() -> None:
     # 如果是 LuckMail 模式且启用了自动购买，启动预检测后台线程
     prefetch_thread = None
     if EMAIL_MODE == "luckmail" and LUCKMAIL_AUTO_BUY:
+        # 设置只使用已购邮箱模式标志
+        global _luckmail_purchased_only, _luckmail_skip_purchased
+        _luckmail_purchased_only = LUCKMAIL_PURCHASED_ONLY
+        _luckmail_skip_purchased = LUCKMAIL_SKIP_PURCHASED
+
+        if _luckmail_purchased_only:
+            print("[*] 已购邮箱模式：只使用已购邮箱，不购买新邮箱")
+        elif _luckmail_skip_purchased:
+            print("[*] 预检测模式：跳过已购邮箱，直接购买新邮箱")
         print("[*] 启动预检测后台线程，维护活跃邮箱池...")
         global _active_email_queue
         if _active_email_queue is None:
@@ -2918,7 +3189,8 @@ def main() -> None:
         # 等待预检测线程准备第一批邮箱
         print("[*] 等待预检测线程准备活跃邮箱...")
         wait_count = 0
-        while len(_active_email_queue) < 3 and wait_count < 30:  # 最多等30秒
+        max_wait = 30 if not _luckmail_purchased_only else 60  # 已购邮箱模式等待更久
+        while len(_active_email_queue) < 3 and wait_count < max_wait:
             time.sleep(1)
             wait_count += 1
         print(f"[*] 当前活跃邮箱池: {len(_active_email_queue)} 个")
@@ -2930,10 +3202,43 @@ def main() -> None:
     if args.once and not batch_count:
         batch_count = 1
 
+    # 初始化注册统计
+    global _reg_stats
+    _reg_stats = RegistrationStats()
+
+    # 启动统计展示线程
+    _stats_last_line = ""  # 用于存储最后一行统计
+    stop_event = threading.Event()
+
+    def _stats_display_thread():
+        """定期更新底部统计行"""
+        global _stats_last_line
+        # 先打印一个空行预留统计行位置
+        print("\n" + " " * 80)  # 预留底部行
+        while not stop_event.is_set():
+            time.sleep(1)  # 每秒更新一次
+            if _reg_stats:
+                stats_line = _reg_stats.format_compact()
+                _stats_last_line = stats_line
+                # 使用 ANSI 转义序列：保存光标位置，移动到最后一行，打印统计，恢复光标
+                sys.stdout.write("\033[s")  # 保存光标位置
+                sys.stdout.write("\033[999;1H")  # 移动到最后一行
+                sys.stdout.write(stats_line)
+                sys.stdout.write("\033[u")  # 恢复光标位置
+                sys.stdout.flush()
+
+    # 启动统计展示线程（所有模式都显示）
+    stats_thread = threading.Thread(target=_stats_display_thread, daemon=True)
+    stats_thread.start()
+
     if batch_count and batch_count > 0:
         remaining = [batch_count]
         stop_event = threading.Event()
         actual_threads = min(thread_count, batch_count)
+
+        # 启动统计展示线程
+        stats_thread = threading.Thread(target=_stats_display_thread, daemon=True)
+        stats_thread.start()
 
         if actual_threads <= 1:
             _worker(
@@ -2982,10 +3287,11 @@ def main() -> None:
                     t.join(timeout=5)
 
         print(f"\n[*] 批量注册完毕! 共成功: {_success_counter} / 目标: {batch_count}")
+        # 显示最终统计
+        if _reg_stats:
+            print(_reg_stats.format_display())
 
     else:
-        stop_event = threading.Event()
-
         if thread_count <= 1:
             try:
                 _worker(
