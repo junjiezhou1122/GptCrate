@@ -14,6 +14,8 @@ class MailProviderTests(unittest.TestCase):
             "MAIL_DOMAIN": ctx.MAIL_DOMAIN,
             "LUCKMAIL_AUTO_BUY": ctx.LUCKMAIL_AUTO_BUY,
             "LUCKMAIL_OWN_ONLY": ctx.LUCKMAIL_OWN_ONLY,
+            "LOCAL_OUTLOOK_MAIL_MODE": ctx.LOCAL_OUTLOOK_MAIL_MODE,
+            "LOCAL_OUTLOOK_BAD_FILE": ctx.LOCAL_OUTLOOK_BAD_FILE,
             "LUCKMAIL_API_KEY": ctx.LUCKMAIL_API_KEY,
             "HOTMAIL007_API_KEY": ctx.HOTMAIL007_API_KEY,
             "_email_queue": ctx._email_queue,
@@ -31,6 +33,8 @@ class MailProviderTests(unittest.TestCase):
         ctx.MAIL_DOMAIN = self._original["MAIL_DOMAIN"]
         ctx.LUCKMAIL_AUTO_BUY = self._original["LUCKMAIL_AUTO_BUY"]
         ctx.LUCKMAIL_OWN_ONLY = self._original["LUCKMAIL_OWN_ONLY"]
+        ctx.LOCAL_OUTLOOK_MAIL_MODE = self._original["LOCAL_OUTLOOK_MAIL_MODE"]
+        ctx.LOCAL_OUTLOOK_BAD_FILE = self._original["LOCAL_OUTLOOK_BAD_FILE"]
         ctx.LUCKMAIL_API_KEY = self._original["LUCKMAIL_API_KEY"]
         ctx.HOTMAIL007_API_KEY = self._original["HOTMAIL007_API_KEY"]
         ctx._email_queue = self._original["_email_queue"]
@@ -67,6 +71,144 @@ class MailProviderTests(unittest.TestCase):
 
         self.assertEqual((email, token), ("user@example.com", "user@example.com"))
         self.assertEqual(ctx._hotmail007_credentials["user@example.com"]["known_ids"], {"known-id"})
+
+    def test_get_email_and_token_dispatches_to_local_outlook_mode(self):
+        ctx.EMAIL_MODE = "local_outlook"
+        ctx.LOCAL_OUTLOOK_MAIL_MODE = "graph"
+
+        class FakeQueue:
+            def __init__(self):
+                self.used = False
+
+            def __len__(self):
+                return 0 if self.used else 1
+
+            def pop(self):
+                if self.used:
+                    return None
+                self.used = True
+                return {
+                    "email": "local@example.com",
+                    "password": "ms-pass",
+                    "client_id": "client-id",
+                    "refresh_token": "refresh-token",
+                }
+
+        ctx._email_queue = FakeQueue()
+
+        with mock.patch.object(hotmail, "_outlook_get_graph_token", return_value="access-token"), \
+             mock.patch.object(hotmail, "_outlook_get_known_ids", return_value={"known-id"}):
+            email, token = mail.get_email_and_token()
+
+        self.assertEqual((email, token), ("local@example.com", "local@example.com"))
+        self.assertEqual(ctx._hotmail007_credentials["local@example.com"]["client_id"], "client-id")
+        self.assertEqual(ctx._hotmail007_credentials["local@example.com"]["known_ids"], {"known-id"})
+
+    def test_local_outlook_invalid_account_is_recorded_and_skipped(self):
+        import os
+        import tempfile
+
+        ctx.EMAIL_MODE = "local_outlook"
+        ctx.LOCAL_OUTLOOK_MAIL_MODE = "graph"
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bad_file = os.path.join(temp_dir, "bad.txt")
+            ctx.LOCAL_OUTLOOK_BAD_FILE = bad_file
+
+            class FakeQueue:
+                def __init__(self):
+                    self.items = [
+                        {
+                            "email": "bad@example.com",
+                            "password": "bad-pass",
+                            "client_id": "bad-client",
+                            "refresh_token": "bad-refresh",
+                        },
+                        {
+                            "email": "good@example.com",
+                            "password": "good-pass",
+                            "client_id": "good-client",
+                            "refresh_token": "good-refresh",
+                        },
+                    ]
+
+                def __len__(self):
+                    return len(self.items)
+
+                def pop(self):
+                    return self.items.pop(0) if self.items else None
+
+            ctx._email_queue = FakeQueue()
+
+            def fake_graph_token(client_id, refresh_token, proxies=None):
+                if client_id == "bad-client":
+                    raise Exception("invalid_grant")
+                return "access-token"
+
+            with mock.patch.object(hotmail, "_outlook_get_graph_token", side_effect=fake_graph_token), \
+                 mock.patch.object(hotmail, "_outlook_get_known_ids", return_value=set()):
+                email, token = mail.get_email_and_token()
+
+            self.assertEqual((email, token), ("good@example.com", "good@example.com"))
+            self.assertTrue(os.path.exists(bad_file))
+            with open(bad_file, "r", encoding="utf-8") as handle:
+                bad_content = handle.read()
+            self.assertIn("bad@example.com----bad-pass----bad-client----bad-refresh", bad_content)
+
+    def test_local_outlook_uses_imap_mode_when_configured(self):
+        ctx.EMAIL_MODE = "local_outlook"
+        ctx.LOCAL_OUTLOOK_MAIL_MODE = "imap"
+
+        class FakeQueue:
+            def __len__(self):
+                return 0
+
+            def pop(self):
+                return {
+                    "email": "imap@example.com",
+                    "password": "imap-pass",
+                    "client_id": "imap-client",
+                    "refresh_token": "imap-refresh",
+                }
+
+        ctx._email_queue = FakeQueue()
+
+        with mock.patch.object(hotmail, "_outlook_get_imap_token", return_value=("token", "outlook.office365.com")) as imap_mock, \
+             mock.patch.object(hotmail, "_outlook_get_known_ids", return_value=set()):
+            email, token = mail.get_email_and_token()
+
+        self.assertEqual((email, token), ("imap@example.com", "imap@example.com"))
+        self.assertEqual(ctx._hotmail007_credentials["imap@example.com"]["mail_mode"], "imap")
+        imap_mock.assert_called()
+
+    def test_local_outlook_mail_error_records_bad_account(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            bad_file = os.path.join(temp_dir, "bad.txt")
+            ctx.LOCAL_OUTLOOK_BAD_FILE = bad_file
+            ctx._hotmail007_credentials["broken@example.com"] = {
+                "client_id": "client",
+                "refresh_token": "refresh",
+                "mail_mode": "graph",
+                "source": "local_outlook",
+                "account_line": "broken@example.com----pass----client----refresh",
+                "known_ids": set(),
+            }
+
+            with mock.patch.object(hotmail, "_outlook_fetch_otp", return_value="") as fetch_mock:
+                def inject_error(*args, **kwargs):
+                    ctx._hotmail007_credentials["broken@example.com"]["last_mail_error"] = "token_error:invalid_grant"
+                    return ""
+
+                fetch_mock.side_effect = inject_error
+                code = hotmail.get_oai_code("broken@example.com")
+
+            self.assertEqual(code, "")
+            self.assertTrue(os.path.exists(bad_file))
+            with open(bad_file, "r", encoding="utf-8") as handle:
+                self.assertIn("broken@example.com----pass----client----refresh", handle.read())
 
     def test_get_email_and_token_dispatches_to_luckmail_order_mode(self):
         ctx.EMAIL_MODE = "luckmail"

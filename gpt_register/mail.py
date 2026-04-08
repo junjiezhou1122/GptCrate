@@ -8,6 +8,7 @@ from .cf_mail import get_oai_code as get_cf_oai_code
 from .hotmail import _outlook_fetch_otp, _outlook_get_known_ids, hotmail007_get_balance, hotmail007_get_mail, hotmail007_get_stock
 from .hotmail import delete_temp_email as delete_hotmail_temp_email
 from .hotmail import get_email_and_token as get_hotmail_email_and_token
+from .hotmail import get_local_email_and_token as get_local_outlook_email_and_token
 from .hotmail import get_oai_code as get_hotmail_oai_code
 from .luckmail import _prefetch_active_emails, luckmail_batch_buy_and_check, luckmail_buy_email, luckmail_check_email_alive, luckmail_check_purchased_emails, luckmail_create_order, luckmail_disable_email, luckmail_get_all_purchased_emails, luckmail_get_code, luckmail_get_code_by_token, luckmail_get_purchased_emails, luckmail_get_purchases
 from .luckmail import delete_temp_email as delete_luckmail_temp_email
@@ -29,6 +30,8 @@ def get_email_and_token(proxies: Any = None) -> tuple:
         return email, email
     if ctx.EMAIL_MODE == "hotmail007":
         return get_hotmail_email_and_token(proxies=proxies)
+    if ctx.EMAIL_MODE == "local_outlook":
+        return get_local_outlook_email_and_token(proxies=proxies)
     if ctx.EMAIL_MODE == "luckmail":
         return get_luckmail_email_and_token(proxies=proxies)
     return get_cf_email_and_token()
@@ -38,6 +41,8 @@ def get_oai_code(token: str, email: str, proxies: Any = None, seen_ids: set = No
     del token
     if ctx.EMAIL_MODE == "hotmail007":
         return get_hotmail_oai_code(email=email, proxies=proxies)
+    if ctx.EMAIL_MODE == "local_outlook":
+        return get_hotmail_oai_code(email=email, proxies=proxies)
     if ctx.EMAIL_MODE == "luckmail":
         return get_luckmail_oai_code(email=email, proxies=proxies, seen_ids=seen_ids)
     return get_cf_oai_code(email=email, proxies=proxies, seen_ids=seen_ids)
@@ -45,6 +50,9 @@ def get_oai_code(token: str, email: str, proxies: Any = None, seen_ids: set = No
 
 def delete_temp_email(email: str, proxies: Any = None) -> None:
     if ctx.EMAIL_MODE == "hotmail007":
+        delete_hotmail_temp_email(email, proxies=proxies)
+        return
+    if ctx.EMAIL_MODE == "local_outlook":
         delete_hotmail_temp_email(email, proxies=proxies)
         return
     if ctx.EMAIL_MODE == "luckmail":

@@ -44,6 +44,8 @@ HOTMAIL007_API_URL = os.getenv("HOTMAIL007_API_URL", "https://gapi.hotmail007.co
 HOTMAIL007_API_KEY = os.getenv("HOTMAIL007_API_KEY", "").strip()
 HOTMAIL007_MAIL_TYPE = os.getenv("HOTMAIL007_MAIL_TYPE", "outlook Trusted Graph").strip()
 HOTMAIL007_MAIL_MODE = os.getenv("HOTMAIL007_MAIL_MODE", "graph").strip().lower()
+LOCAL_OUTLOOK_MAIL_MODE = os.getenv("LOCAL_OUTLOOK_MAIL_MODE", "graph").strip().lower()
+LOCAL_OUTLOOK_BAD_FILE = os.getenv("LOCAL_OUTLOOK_BAD_FILE", "bad_local_outlook.txt").strip()
 
 LUCKMAIL_API_KEY = os.getenv("LUCKMAIL_API_KEY", "").strip()
 LUCKMAIL_API_URL = os.getenv("LUCKMAIL_API_URL", "https://mails.luckyous.com/api/v1/openapi").rstrip("/")
@@ -146,6 +148,69 @@ class EmailQueue:
             return len(self._emails)
 
 
+class LocalOutlookAccountQueue:
+    """线程安全的本地 Outlook 账号队列，支持邮箱----密码----client_id----refresh_token"""
+
+    def __init__(self, filepath: str):
+        self._filepath = filepath
+        self._accounts: List[dict] = []
+        self._lock = threading.Lock()
+        self._load()
+
+    def _load(self) -> None:
+        if not os.path.exists(self._filepath):
+            return
+        with open(self._filepath, "r", encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = [part.strip() for part in line.split("----", 3)]
+                if len(parts) != 4:
+                    continue
+                email, password, client_id, refresh_token = parts
+                if not email or "@" not in email or not client_id or not refresh_token:
+                    continue
+                self._accounts.append(
+                    {
+                        "email": email,
+                        "password": password,
+                        "client_id": client_id,
+                        "refresh_token": refresh_token,
+                    }
+                )
+
+    def pop(self) -> Optional[dict]:
+        with self._lock:
+            if not self._accounts:
+                return None
+            account = self._accounts.pop(0)
+            self._save_unlocked()
+            return account
+
+    def _save_unlocked(self) -> None:
+        try:
+            with open(self._filepath, "w", encoding="utf-8") as f:
+                for account in self._accounts:
+                    f.write(
+                        "----".join(
+                            [
+                                account.get("email", ""),
+                                account.get("password", ""),
+                                account.get("client_id", ""),
+                                account.get("refresh_token", ""),
+                            ]
+                        )
+                        + "\n"
+                    )
+        except Exception:
+            pass
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._accounts)
+
+
 class RegistrationStats:
     """注册统计类，实时跟踪注册情况"""
 
@@ -243,12 +308,13 @@ class RegistrationStats:
         minutes = int((elapsed % 3600) // 60)
         seconds = int(elapsed % 60)
         return (
-            f"\r\033[K[⏱️{hours:02d}:{minutes:02d}:{seconds:02d}] "
-            f"[尝试:{stats['total_attempts']}] "
-            f"[✅{stats['success_count']}|❌{stats['fail_count']}] "
-            f"[总率:{stats['overall_success_rate']:.1f}%] "
-            f"[近10次:{stats['recent_success_rate']:.1f}%] "
-            f"[🚀{stats['speed_per_hour']:.1f}/h]"
+            f"状态 | ⏱️ {hours:02d}:{minutes:02d}:{seconds:02d} | "
+            f"尝试 {stats['total_attempts']} | "
+            f"成功 {stats['success_count']} | "
+            f"失败 {stats['fail_count']} | "
+            f"总率 {stats['overall_success_rate']:.1f}% | "
+            f"近10次 {stats['recent_success_rate']:.1f}% | "
+            f"速度 {stats['speed_per_hour']:.1f}/h"
         )
 
 

@@ -40,6 +40,8 @@ class GptMainTests(unittest.TestCase):
             "LUCKMAIL_AUTO_BUY": ctx.LUCKMAIL_AUTO_BUY,
             "LUCKMAIL_PURCHASED_ONLY": ctx.LUCKMAIL_PURCHASED_ONLY,
             "LUCKMAIL_OWN_ONLY": ctx.LUCKMAIL_OWN_ONLY,
+            "LOCAL_OUTLOOK_MAIL_MODE": ctx.LOCAL_OUTLOOK_MAIL_MODE,
+            "LOCAL_OUTLOOK_BAD_FILE": ctx.LOCAL_OUTLOOK_BAD_FILE,
             "LUCKMAIL_CHECK_WORKERS": ctx.LUCKMAIL_CHECK_WORKERS,
             "LUCKMAIL_MAX_RETRY": ctx.LUCKMAIL_MAX_RETRY,
             "_email_queue": ctx._email_queue,
@@ -154,6 +156,44 @@ class GptMainTests(unittest.TestCase):
         self.assertEqual(len(FakeThread.instances), 1)
         self.assertIs(FakeThread.instances[0].target, prefetch_mock)
         self.assertEqual(FakeThread.instances[0].args[1:], (10, 20))
+
+    def test_main_local_outlook_auto_sets_batch_count_from_accounts_file(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            accounts_file = os.path.join(temp_dir, "accounts.txt")
+            with open(accounts_file, "w", encoding="utf-8") as handle:
+                handle.write("user1@example.com----pass----client1----refresh1\n")
+                handle.write("user2@example.com----pass----client2----refresh2\n")
+
+            argv = [
+                "gpt.py",
+                "--email-mode",
+                "local_outlook",
+                "--accounts-file",
+                accounts_file,
+            ]
+
+            with ExitStack() as stack:
+                worker_mock = stack.enter_context(mock.patch.object(cli, "_worker"))
+                stack.enter_context(mock.patch.object(ctx, "_load_proxies", return_value=[]))
+                stack.enter_context(mock.patch.object(cli.threading, "Thread", FakeThread))
+                stack.enter_context(mock.patch.object(cli.time, "sleep", return_value=None))
+                stack.enter_context(mock.patch.object(sys, "argv", argv))
+                with redirect_stdout(StringIO()):
+                    cli.main()
+
+            self.assertEqual(len(FakeThread.instances), 1)
+            worker_mock.assert_called_once()
+            self.assertEqual(worker_mock.call_args.kwargs["count_target"], 2)
+
+    def test_compact_stats_output_no_longer_contains_terminal_escape_sequences(self):
+        stats = ctx.RegistrationStats()
+        stats.add_attempt()
+        stats.add_failure("other_error")
+
+        compact = stats.format_compact()
+
+        self.assertNotIn("\033", compact)
+        self.assertIn("状态 |", compact)
 
 
 if __name__ == "__main__":

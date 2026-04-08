@@ -28,6 +28,7 @@ auths/
 # Accounts
 account.txt
 accounts.txt
+bad_local_outlook.txt
 
 # OS
 .DS_Store

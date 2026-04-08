@@ -9,6 +9,49 @@ from . import context as ctx
 from .cf_mail import extract_otp_code
 
 
+def _resolve_outlook_mail_mode(preferred: str | None = None) -> str:
+    mode = (preferred or "graph").strip().lower()
+    return mode if mode in {"graph", "imap"} else "graph"
+
+
+def _local_outlook_account_to_line(account: dict) -> str:
+    return "----".join(
+        [
+            str(account.get("email") or "").strip(),
+            str(account.get("password") or "").strip(),
+            str(account.get("client_id") or "").strip(),
+            str(account.get("refresh_token") or "").strip(),
+        ]
+    )
+
+
+def _record_local_outlook_bad_account(account: dict, reason: str) -> None:
+    import os
+
+    reason_text = str(reason or "unknown").replace("\n", " ").strip()
+    line = _local_outlook_account_to_line(account)
+    if not line:
+        return
+    bad_file = ctx.LOCAL_OUTLOOK_BAD_FILE or "bad_local_outlook.txt"
+    bad_dir = os.path.dirname(bad_file)
+    if bad_dir:
+        os.makedirs(bad_dir, exist_ok=True)
+    with ctx._file_write_lock:
+        with open(bad_file, "a", encoding="utf-8") as handle:
+            handle.write(f"{line} # {reason_text}\n")
+    print(f"[*] 已记录坏号到 {bad_file}: {account.get('email')} ({reason_text[:120]})")
+
+
+def _set_mail_error(email_addr: str, reason: str | None) -> None:
+    creds = ctx._hotmail007_credentials.get(email_addr)
+    if creds is None:
+        return
+    if reason:
+        creds["last_mail_error"] = reason
+    else:
+        creds.pop("last_mail_error", None)
+
+
 def _hotmail007_api_get(path: str, proxies: Any = None, **params) -> dict:
     url = f"{ctx.HOTMAIL007_API_URL}/{path.lstrip('/')}"
     if params:
@@ -252,9 +295,11 @@ def _outlook_get_known_ids(email_addr: str, client_id: str, refresh_token: str, 
 
 
 def _outlook_fetch_otp_graph(email_addr: str, client_id: str, refresh_token: str, known_ids: set, proxies: Any = None, timeout: int = 120) -> str:
+    _set_mail_error(email_addr, None)
     try:
         access_token = _outlook_get_graph_token(client_id, refresh_token, proxies)
     except Exception as exc:
+        _set_mail_error(email_addr, f"token_error:{exc}")
         print(f"[Graph] access token 失败: {exc}")
         return ""
 
@@ -301,6 +346,7 @@ def _outlook_fetch_otp_graph(email_addr: str, client_id: str, refresh_token: str
         except Exception as exc:
             print(f"\n[Graph] 轮询出错: {exc}", end="", flush=True)
         time.sleep(3)
+    _set_mail_error(email_addr, "otp_timeout")
     print(" 超时，未收到验证码")
     return ""
 
@@ -309,9 +355,11 @@ def _outlook_fetch_otp_imap(email_addr: str, client_id: str, refresh_token: str,
     import email as email_lib
     import imaplib
 
+    _set_mail_error(email_addr, None)
     try:
         access_token, imap_server = _outlook_get_imap_token(client_id, refresh_token, proxies, email_addr=email_addr)
     except Exception as exc:
+        _set_mail_error(email_addr, f"token_error:{exc}")
         print(f"[IMAP] access token 失败: {exc}")
         return ""
 
@@ -369,13 +417,25 @@ def _outlook_fetch_otp_imap(email_addr: str, client_id: str, refresh_token: str,
                 except Exception:
                     pass
         time.sleep(3)
+    _set_mail_error(email_addr, "otp_timeout")
     print(" 超时，未收到验证码")
     return ""
 
 
-def _outlook_fetch_otp(email_addr: str, client_id: str, refresh_token: str, known_ids: set | None = None, proxies: Any = None, timeout: int = 120) -> str:
+def _outlook_fetch_otp(
+    email_addr: str,
+    client_id: str,
+    refresh_token: str,
+    known_ids: set | None = None,
+    proxies: Any = None,
+    timeout: int = 120,
+    mail_mode: str = "graph",
+) -> str:
     if known_ids is None:
         known_ids = set()
+    resolved_mode = _resolve_outlook_mail_mode(mail_mode)
+    if resolved_mode == "imap":
+        return _outlook_fetch_otp_imap(email_addr, client_id, refresh_token, known_ids, proxies, timeout)
     return _outlook_fetch_otp_graph(email_addr, client_id, refresh_token, known_ids, proxies, timeout)
 
 
@@ -400,19 +460,73 @@ def get_email_and_token(proxies: Any = None) -> tuple:
     return email, email
 
 
+def get_local_email_and_token(proxies: Any = None) -> tuple:
+    if ctx._email_queue is None:
+        print("[Error] 本地 Outlook 账号队列未初始化")
+        return "", ""
+    mode = _resolve_outlook_mail_mode(ctx.LOCAL_OUTLOOK_MAIL_MODE)
+    while True:
+        account = ctx._email_queue.pop()
+        if not account:
+            print("[Error] 本地 Outlook 账号已用完")
+            return "", ""
+        email = account["email"]
+        print(f"[*] 从本地账号文件读取 Outlook 账号: {email} (剩余: {len(ctx._email_queue)})")
+        try:
+            if mode == "imap":
+                _outlook_get_imap_token(account["client_id"], account["refresh_token"], proxies, email_addr=email)
+            else:
+                _outlook_get_graph_token(account["client_id"], account["refresh_token"], proxies)
+        except Exception as exc:
+            _record_local_outlook_bad_account(account, f"{mode}_precheck_failed:{exc}")
+            continue
+
+        ctx._hotmail007_credentials[email] = {
+            "client_id": account["client_id"],
+            "refresh_token": account["refresh_token"],
+            "ms_password": account.get("password", ""),
+            "mail_mode": mode,
+            "source": "local_outlook",
+            "account_line": _local_outlook_account_to_line(account),
+        }
+        print(f"[*] 本地 Outlook 模式预检通过 ({mode.upper()})")
+        print("[*] 本地 Outlook 模式预获取已有邮件ID...")
+        known_ids = _outlook_get_known_ids(email, account["client_id"], account["refresh_token"], proxies)
+        ctx._hotmail007_credentials[email]["known_ids"] = known_ids
+        return email, email
+
+
 def get_oai_code(email: str, proxies: Any = None) -> str:
     creds = ctx._hotmail007_credentials.get(email, {})
     if not creds:
         print(f"[Error] 未找到 {email} 的 Hotmail007 凭据")
         return ""
-    return _outlook_fetch_otp(
+    code = _outlook_fetch_otp(
         email,
         creds["client_id"],
         creds["refresh_token"],
         known_ids=creds.get("known_ids", set()),
         proxies=proxies,
         timeout=120,
+        mail_mode=creds.get("mail_mode", ctx.HOTMAIL007_MAIL_MODE),
     )
+    if not code and creds.get("source") == "local_outlook":
+        last_error = str(creds.get("last_mail_error") or "").strip()
+        if last_error and last_error != "otp_timeout":
+            account_line = str(creds.get("account_line") or "").strip()
+            if account_line:
+                parts = account_line.split("----", 3)
+                if len(parts) == 4:
+                    _record_local_outlook_bad_account(
+                        {
+                            "email": parts[0],
+                            "password": parts[1],
+                            "client_id": parts[2],
+                            "refresh_token": parts[3],
+                        },
+                        last_error,
+                    )
+    return code
 
 
 def delete_temp_email(email: str, proxies: Any = None) -> None:

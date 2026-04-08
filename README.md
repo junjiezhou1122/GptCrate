@@ -6,6 +6,13 @@
 
 自动批量注册 OpenAI 账号，支持多代理轮换、多线程并发。
 
+当前支持 4 种邮箱来源：
+
+- `luckmail`：LuckMail API（推荐）
+- `cf`：自建邮箱 / Cloudflare Worker
+- `local_outlook`：本地导入 Outlook 凭据
+- `hotmail007`：Hotmail007 API
+
 ---
 
 > 默认推荐方案：`LuckMail`
@@ -71,6 +78,14 @@ uv run python gpt.py --once
 uv run python start.py
 ```
 
+`start.py` 现已支持：
+- LuckMail
+- 自建邮箱 / Cloudflare Worker
+- 本地 Outlook 导入
+- Hotmail007
+
+推荐优先用 `start.py` 生成 `.env`，再按需手工微调。
+
 ---
 
 ## 环境要求
@@ -99,10 +114,12 @@ pip install curl_cffi
 
 | 文件          | 作用                              |
 | ------------- | --------------------------------- |
-| `gpt.py`      | 主程序                            |
-| `start.py`    | 一键启动器（带交互式配置）        |
-| `.env`        | 配置文件 (邮箱、代理、输出路径等) |
-| `proxies.txt` | 代理列表文件 (每行一个代理)       |
+| `gpt.py`      | 主程序                                                     |
+| `start.py`    | 一键启动器（带交互式配置，支持 4 种邮箱模式）              |
+| `.env`        | 配置文件 (邮箱、代理、输出路径等)                          |
+| `accounts.txt`| 输入账号文件；`file`/`local_outlook` 模式会读取它          |
+| `proxies.txt` | 代理列表文件 (每行一个代理)                                |
+| `tokens/`     | 输出目录；成功 token、成功账号密码、压缩包等都在这里       |
 
 ---
 
@@ -110,11 +127,12 @@ pip install curl_cffi
 
 ### 邮箱模式
 
-支持三种邮箱来源，通过 `EMAIL_MODE` 切换：
+支持四种邮箱来源，通过 `EMAIL_MODE` 切换：
 
 | 模式              | 值           | 说明                                                                                        |
 | ----------------- | ------------ | ------------------------------------------------------------------------------------------- |
 | Cloudflare Worker | `cf`         | 使用自有域名随机生成邮箱，需配置 `MAIL_DOMAIN` / `MAIL_WORKER_BASE` / `MAIL_ADMIN_PASSWORD` |
+| 本地 Outlook 导入 | `local_outlook` | 从 `accounts.txt` 读取 `邮箱----密码----client_id----refresh_token`，直接用本地 Outlook 凭据收信 |
 | Hotmail007 API    | `hotmail007` | 通过 API 拉取微软邮箱，需配置 `HOTMAIL007_API_KEY`                                          |
 | **LuckMail API**  | `luckmail`   | **推荐** 智能购买+预检测活跃邮箱，需配置 `LUCKMAIL_API_KEY`                                 |
 
@@ -126,6 +144,35 @@ MAIL_DOMAIN=your-domain.com
 MAIL_WORKER_BASE=https://mail-worker.your-domain.com
 MAIL_ADMIN_PASSWORD=your-password
 ```
+
+说明：
+
+- 程序会随机生成 `prefix@MAIL_DOMAIN`
+- 收验证码时访问：
+  - `GET {MAIL_WORKER_BASE}/admin/mails`
+  - `DELETE {MAIL_WORKER_BASE}/admin/mails/{id}`
+- 请求头中使用：
+  - `x-admin-auth: MAIL_ADMIN_PASSWORD`
+
+**本地 Outlook 导入模式配置：**
+
+```env
+EMAIL_MODE=local_outlook
+ACCOUNTS_FILE=accounts.txt
+LOCAL_OUTLOOK_MAIL_MODE=graph
+LOCAL_OUTLOOK_BAD_FILE=bad_local_outlook.txt
+```
+
+`accounts.txt` 每行格式：
+
+```txt
+邮箱----密码----client_id----refresh_token
+```
+
+- `LOCAL_OUTLOOK_MAIL_MODE` 支持 `graph` / `imap`
+- 失效账号会自动写入 `LOCAL_OUTLOOK_BAD_FILE`
+- 程序读取的是**项目根目录**下的 `accounts.txt`
+- 成功注册后写入的是 `tokens/accounts.txt`，两者不是同一个文件
 
 **Hotmail007 模式配置：**
 
@@ -150,6 +197,10 @@ LUCKMAIL_API_KEY=你的API密钥
 LUCKMAIL_EMAIL_TYPE=ms_imap
 # 自动购买邮箱并检测活跃度（推荐开启）
 LUCKMAIL_AUTO_BUY=true
+# 只使用已购邮箱
+LUCKMAIL_PURCHASED_ONLY=false
+# 跳过已购邮箱检查，直接买新邮箱
+LUCKMAIL_SKIP_PURCHASED=false
 # 只使用自己导入到 LuckMail 的邮箱（true=只读“我的邮箱”，用完即停）
 LUCKMAIL_OWN_ONLY=false
 # 已购/预检测邮箱活跃度检测并发数
@@ -259,7 +310,8 @@ socks5://user:pass@proxy2.com:1080
 | `--check`                | -                    | 先检测已有 token 状态，不足阈值时自动补注册 |
 | `--sleep-min`            | 5                    | 每次注册间隔最短秒数                        |
 | `--sleep-max`            | 30                   | 每次注册间隔最长秒数                        |
-| `--email-mode`           | 读 .env              | 邮箱模式: `cf` / `hotmail007` / `luckmail`  |
+| `--email-mode`           | 读 .env              | 邮箱模式: `cf` / `hotmail007` / `luckmail` / `local_outlook` |
+| `--local-outlook-mail-mode` | 读 .env           | 本地 Outlook 收信模式: `graph` / `imap`         |
 | `--hotmail007-key`       | 读 .env              | 覆盖 .env 中的 Hotmail007 API Key           |
 | `--hotmail007-type`      | 读 .env              | 覆盖 .env 中的邮箱类型                      |
 | `--hotmail007-mail-mode` | 读 .env              | 收信模式: `graph` / `imap`                  |
@@ -327,9 +379,47 @@ uv run python gpt.py --proxy-file proxies.txt --threads 2
 
 不指定 `--count` 时为无限循环模式，按 `Ctrl+C` 停止。
 
+### 9. 本地 Outlook 导入模式
+
+```env
+EMAIL_MODE=local_outlook
+ACCOUNTS_FILE=accounts.txt
+LOCAL_OUTLOOK_MAIL_MODE=graph
+LOCAL_OUTLOOK_BAD_FILE=bad_local_outlook.txt
+```
+
+```txt
+# accounts.txt
+your@hotmail.com----your_password----client_id----refresh_token
+```
+
+```bash
+uv run python gpt.py --count 1 --threads 1
+```
+
+### 10. 自建邮箱 / Cloudflare Worker 模式
+
+```env
+EMAIL_MODE=cf
+MAIL_DOMAIN=your-domain.com
+MAIL_WORKER_BASE=https://mail-worker.your-domain.com
+MAIL_ADMIN_PASSWORD=your-password
+```
+
+```bash
+uv run python gpt.py --count 1 --threads 1
+```
+
 ---
 
 ## 输出示例
+
+### 当前终端输出风格
+
+- 顶部彩色配置面板
+- 业务日志按时间顺序输出
+- 实时状态仅在关键节点打印，不再周期性刷屏
+- 结束时输出彩色统计面板
 
 ### LuckMail 预检测模式输出（含已购邮箱检测）
 
@@ -368,7 +458,9 @@ uv run python gpt.py --proxy-file proxies.txt --threads 2
 | 文件                        | 说明                                                               |
 | --------------------------- | ------------------------------------------------------------------ |
 | `token_xxx@xxx_时间戳.json` | 注册成功的 Token JSON (含 access_token / refresh_token / email 等) |
-| `accounts.txt`              | 所有成功注册的账号密码，格式: `邮箱----密码`                       |
+| `accounts.txt`              | 输入账号文件；`file` 或 `local_outlook` 模式会读取它               |
+| `tokens/accounts.txt`       | 所有成功注册的账号密码，格式: `邮箱----密码`                       |
+| `bad_local_outlook.txt`     | 本地 Outlook 模式失效账号记录                                      |
 
 ---
 
@@ -382,3 +474,5 @@ uv run python gpt.py --proxy-file proxies.txt --threads 2
 6. **已购邮箱模式**当前默认只筛选 `@hotmail.com`，并把检测通过的邮箱立即加入号池
 7. 可用 `LUCKMAIL_CHECK_WORKERS` 调整已购/预检测活跃度检测并发数（默认 `20`）
 8. 排查 LuckMail 收不到验证码时，可临时开启 `LUCKMAIL_MAIL_DEBUG=true` 查看 `token/mails` 摘要、最近邮件主题与 fallback 状态
+9. `local_outlook` 模式下，`accounts.txt` 读取后会被消费；失效号会追加到 `LOCAL_OUTLOOK_BAD_FILE`
+10. `cf` 模式下如果收不到验证码，优先检查 `MAIL_WORKER_BASE` 是否包含协议（例如 `https://`）以及 `/admin/mails` 是否能返回目标邮箱邮件

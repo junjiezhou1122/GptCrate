@@ -57,11 +57,13 @@ def select_platform() -> str:
     print("请选择邮箱平台:")
     print("  1. LuckMail (推荐 - 自动接码，省心省力)")
     print("  2. Hotmail007 (需要已有微软邮箱)")
+    print("  3. 本地 Outlook 导入 (使用 邮箱----密码----client_id----刷新令牌)")
+    print("  4. 自建邮箱 / Cloudflare Worker")
     print()
     return _prompt_choice(
-        "请输入选项 (1/2): ",
-        {"1": "luckmail", "2": "hotmail007"},
-        "无效选项，请输入 1 或 2",
+        "请输入选项 (1/2/3/4): ",
+        {"1": "luckmail", "2": "hotmail007", "3": "local_outlook", "4": "cf"},
+        "无效选项，请输入 1、2、3 或 4",
     )
 
 def select_luckmail_mode() -> str:
@@ -95,6 +97,17 @@ def select_email_type() -> str:
         "无效选项，请输入 1 或 2",
     )
 
+def select_local_outlook_mail_mode() -> str:
+    print("\n请选择本地 Outlook 收信模式:")
+    print("  1. graph (Microsoft Graph API，默认)")
+    print("  2. imap (IMAP 协议)")
+    print()
+    return _prompt_choice(
+        "请输入选项 (1/2，默认1): ",
+        {"": "graph", "1": "graph", "2": "imap"},
+        "无效选项，请输入 1 或 2",
+    )
+
 def _read_env_value(path: str, key: str) -> Optional[str]:
     if not os.path.exists(path):
         return None
@@ -115,7 +128,20 @@ def _read_env_value(path: str, key: str) -> Optional[str]:
             return value or None
     return None
 
+def _prompt_required_with_default(prompt: str, default: Optional[str] = None) -> str:
+    while True:
+        suffix = f" [{default}]" if default else ""
+        value = input(f"{prompt}{suffix}: ").strip()
+        if value:
+            return value
+        if default:
+            return default
+        print("该项不能为空")
+
 def get_api_key(platform: str) -> str:
+    if platform in {"local_outlook", "cf"}:
+        return ""
+
     # 先检查 .env 文件是否已有 API Key
     env_key = "LUCKMAIL_API_KEY" if platform == "luckmail" else "HOTMAIL007_API_KEY"
     existing_key = _read_env_value(".env", env_key)
@@ -132,6 +158,17 @@ def get_api_key(platform: str) -> str:
         print("(在你的 Hotmail007 账户 -> API 中获取)")
     
     return input("请输入 API Key: ").strip()
+
+def get_cf_config() -> tuple[str, str, str]:
+    existing_domain = _read_env_value(".env", "MAIL_DOMAIN")
+    existing_worker = _read_env_value(".env", "MAIL_WORKER_BASE")
+    existing_password = _read_env_value(".env", "MAIL_ADMIN_PASSWORD")
+
+    print("\n请输入自建邮箱 / Cloudflare Worker 配置:")
+    domain = _prompt_required_with_default("MAIL_DOMAIN", existing_domain)
+    worker_base = _prompt_required_with_default("MAIL_WORKER_BASE", existing_worker)
+    admin_password = _prompt_required_with_default("MAIL_ADMIN_PASSWORD", existing_password)
+    return domain, worker_base, admin_password
 
 def get_count() -> Optional[int]:
     print("\n请输入要注册的账号数量:")
@@ -150,12 +187,16 @@ def generate_env(
     threads: int,
     luckmail_mode: str = "prefetch",
     email_type: str = "ms_imap",
+    local_outlook_mail_mode: str = "graph",
+    cf_domain: str = "",
+    cf_worker_base: str = "",
+    cf_admin_password: str = "",
 ) -> None:
     batch_count_line = f"BATCH_COUNT={count}" if count else "# BATCH_COUNT=10"
     batch_threads_line = f"BATCH_THREADS={threads}"
-    env_content = f"""MAIL_DOMAIN=
-MAIL_WORKER_BASE=
-MAIL_ADMIN_PASSWORD=
+    env_content = f"""MAIL_DOMAIN={cf_domain}
+MAIL_WORKER_BASE={cf_worker_base}
+MAIL_ADMIN_PASSWORD={cf_admin_password}
 TOKEN_OUTPUT_DIR=./tokens
 CLI_PROXY_AUTHS_DIR=
 
@@ -217,13 +258,24 @@ LUCKMAIL_CHECK_WORKERS=20
 # 邮箱不活跃时的最大重试次数
 LUCKMAIL_MAX_RETRY=3
 """
-    else:
+    elif platform == "hotmail007":
         env_content += f"""
 # Hotmail007 模式配置
 HOTMAIL007_API_URL=https://gapi.hotmail007.com
 HOTMAIL007_API_KEY={api_key}
 HOTMAIL007_MAIL_TYPE=hotmail Trusted Graph
 HOTMAIL007_MAIL_MODE=imap
+"""
+    elif platform == "cf":
+        env_content += """
+# 自建邮箱 / Cloudflare Worker 模式
+"""
+    else:
+        env_content += f"""
+# 本地 Outlook 导入模式
+# accounts.txt 每行格式: 邮箱----密码----client_id----refresh_token
+LOCAL_OUTLOOK_MAIL_MODE={local_outlook_mail_mode}
+LOCAL_OUTLOOK_BAD_FILE=bad_local_outlook.txt
 """
 
     with open(".env", "w", encoding="utf-8") as f:
@@ -265,14 +317,22 @@ def main() -> None:
     # LuckMail 额外选项
     luckmail_mode = "prefetch"
     email_type = "ms_imap"
+    local_outlook_mail_mode = "graph"
+    cf_domain = ""
+    cf_worker_base = ""
+    cf_admin_password = ""
     if platform == "luckmail":
         luckmail_mode = select_luckmail_mode()
         if luckmail_mode in ["prefetch", "realtime"]:
             email_type = select_email_type()
+    elif platform == "local_outlook":
+        local_outlook_mail_mode = select_local_outlook_mail_mode()
+    elif platform == "cf":
+        cf_domain, cf_worker_base, cf_admin_password = get_cf_config()
 
     # 获取 API Key
     api_key = get_api_key(platform)
-    if not api_key:
+    if platform != "local_outlook" and not api_key:
         print("错误: API Key 不能为空")
         sys.exit(1)
 
@@ -283,7 +343,18 @@ def main() -> None:
     threads = get_threads()
 
     # 生成配置
-    generate_env(platform, api_key, count, threads, luckmail_mode, email_type)
+    generate_env(
+        platform,
+        api_key,
+        count,
+        threads,
+        luckmail_mode,
+        email_type,
+        local_outlook_mail_mode,
+        cf_domain,
+        cf_worker_base,
+        cf_admin_password,
+    )
     print("\n✅ 配置文件已生成!")
 
     # 运行
