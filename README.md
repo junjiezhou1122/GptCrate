@@ -197,15 +197,25 @@ LUCKMAIL_MAX_RETRY=3
 
 ### 代理配置
 
-两种方式二选一：
+支持普通代理和 Resin 粘性代理两种方式：
 
 ```env
-# 方式一：单代理
+# 方式一：普通代理
 PROXY=http://127.0.0.1:7890
 
 # 方式二：代理列表文件 (批量注册时自动轮换)
 PROXY_FILE=proxies.txt
+
+# 方式三：Resin 粘性代理（整个注册流程使用同一个出口 IP）
+RESIN_URL=http://token@resin-host:2260
+RESIN_PLATFORM=Default
+RESIN_STICKY=true
 ```
+
+**Resin 粘性代理说明：**
+- 启用后，整个注册流程（邮箱创建、OAuth、验证码、Token交换）都通过同一个代理连接
+- Resin 会将该 Account 绑定到同一个出口 IP，实现粘性会话
+- 适合需要固定出口 IP 的场景，避免 IP 变化导致风控
 
 ### 批量注册配置
 
@@ -251,8 +261,10 @@ socks5://user:pass@proxy2.com:1080
 
 | 参数                     | 默认值               | 说明                                        |
 | ------------------------ | -------------------- | ------------------------------------------- |
-| `--proxy`                | 无                   | 单个代理地址                                |
+| `--proxy`                | 无                   | 单个代理地址或 Resin 网关地址              |
 | `--proxy-file`           | 读 .env `PROXY_FILE` | 代理列表文件路径                            |
+| `--resin-sticky`         | 读 .env `RESIN_STICKY` | 启用 Resin 粘性代理                        |
+| `--resin-platform`       | 读 .env `RESIN_PLATFORM` | Resin Platform 名称                      |
 | `--count`                | 无 (无限循环)        | 批量注册数量，注册够了自动停止              |
 | `--threads`              | 1                    | 并发线程数                                  |
 | `--once`                 | -                    | 只运行一次 (等同 `--count 1`)               |
@@ -311,7 +323,23 @@ BATCH_THREADS=2
 uv run python gpt.py
 ```
 
-### 7. 检测已有 token + 自动补注册
+### 7. Resin 粘性代理注册
+
+```env
+# 方式一：.env 配置
+RESIN_URL=http://token@resin-host:2260
+RESIN_PLATFORM=US
+RESIN_STICKY=true
+```
+
+```bash
+uv run python gpt.py --count 10
+
+# 方式二：命令行参数
+uv run python gpt.py --proxy http://token@resin-host:2260 --resin-sticky --resin-platform US --count 10
+```
+
+### 8. 检测已有 token + 自动补注册
 
 ```bash
 uv run python gpt.py --check --proxy-file proxies.txt
@@ -319,7 +347,7 @@ uv run python gpt.py --check --proxy-file proxies.txt
 
 先扫描 `CLI_PROXY_AUTHS_DIR` 下的 token 文件，刷新过期的、删除无效的，可用数低于阈值 (默认 10) 时自动补注册。
 
-### 8. 无限循环模式 (持续注册)
+### 9. 无限循环模式 (持续注册)
 
 ```bash
 uv run python gpt.py --proxy-file proxies.txt --threads 2
