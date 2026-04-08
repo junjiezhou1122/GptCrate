@@ -7,6 +7,7 @@ from curl_cffi import requests
 
 from . import context as ctx
 from .cf_mail import extract_otp_code
+from .ui import rich_print as print
 
 
 def _resolve_outlook_mail_mode(preferred: str | None = None) -> str:

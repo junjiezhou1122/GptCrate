@@ -11,6 +11,7 @@ from curl_cffi import requests
 
 from . import context as ctx
 from . import mail, oauth
+from .ui import rich_print as print
 
 
 _FIRST_NAMES = [
@@ -502,7 +503,6 @@ def run(proxy: Optional[str]) -> tuple:
                 )
                 return token_json, password, email
             current_url = next_url
-            time.sleep(0.5)
 
         print("[Error] 未能在重定向链中捕获到最终 Callback URL")
         return None, None, email

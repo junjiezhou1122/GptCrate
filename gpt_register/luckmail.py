@@ -8,6 +8,7 @@ from curl_cffi import requests
 
 from . import context as ctx
 from .cf_mail import extract_otp_code
+from .ui import rich_print as print
 
 
 def _store_luckmail_credential(email: str, **credential_data) -> tuple[str, str]:

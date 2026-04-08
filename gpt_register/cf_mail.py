@@ -7,6 +7,7 @@ from typing import Any, Optional, Set
 from curl_cffi import requests
 
 from . import context as ctx
+from .ui import rich_print as print
 
 
 def generate_email() -> tuple[str, str]:
