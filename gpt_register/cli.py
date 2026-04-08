@@ -8,6 +8,8 @@ import time
 from datetime import datetime
 from typing import Optional
 
+import cpa2sub
+
 from . import context as ctx
 from . import mail, oauth, register
 
@@ -143,19 +145,34 @@ def _save_result(token_json: str, password: str, proxy_str: Optional[str]) -> No
         fname_email = t_data.get("email", "unknown").replace("@", "_")
         account_email = t_data.get("email", "")
     except Exception:
+        t_data = {}
         fname_email = "unknown"
         account_email = ""
 
-    file_name = f"token_{fname_email}_{int(time.time())}.json"
+    timestamp = int(time.time())
+    file_name = f"token_{fname_email}_{timestamp}.json"
+    sub_file_name = f"sub_{fname_email}_{timestamp}.json"
     if ctx.TOKEN_OUTPUT_DIR:
         os.makedirs(ctx.TOKEN_OUTPUT_DIR, exist_ok=True)
         file_name = os.path.join(ctx.TOKEN_OUTPUT_DIR, file_name)
+        sub_file_name = os.path.join(ctx.TOKEN_OUTPUT_DIR, sub_file_name)
 
     with ctx._file_write_lock:
         with open(file_name, "w", encoding="utf-8") as f:
             f.write(token_json)
 
     _safe_print(f"[*] 成功! Token 已保存至: {file_name}")
+
+    if t_data:
+        try:
+            sub_account = cpa2sub.convert_current_token_to_sub(t_data, index=1)
+            sub_export = cpa2sub.build_export([sub_account])
+            with ctx._file_write_lock:
+                with open(sub_file_name, "w", encoding="utf-8") as sf:
+                    json.dump(sub_export, sf, ensure_ascii=False, indent=2)
+            _safe_print(f"[*] Sub 格式已保存至: {sub_file_name}")
+        except Exception as exc:
+            _safe_print(f"[Warning] 保存 Sub 格式失败: {exc}")
 
     if os.path.isdir(ctx.CLI_PROXY_AUTHS_DIR) and account_email:
         dest = os.path.join(ctx.CLI_PROXY_AUTHS_DIR, f"codex-{account_email}.json")

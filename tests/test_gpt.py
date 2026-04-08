@@ -1,3 +1,4 @@
+import json
 import os
 import sys
 import tempfile
@@ -194,6 +195,46 @@ class GptMainTests(unittest.TestCase):
 
         self.assertNotIn("\033", compact)
         self.assertIn("状态 |", compact)
+
+    def test_save_result_writes_cpa_and_sub_formats(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            token_json = (
+                '{"access_token":"access-token","refresh_token":"refresh-token",'
+                '"account_id":"acc-001","email":"user@example.com","type":"codex",'
+                '"expired":"2026-04-18T04:30:34Z"}'
+            )
+            original_output_dir = ctx.TOKEN_OUTPUT_DIR
+            original_proxy_auths_dir = ctx.CLI_PROXY_AUTHS_DIR
+
+            try:
+                ctx.TOKEN_OUTPUT_DIR = temp_dir
+                ctx.CLI_PROXY_AUTHS_DIR = ""
+                with mock.patch.object(cli.time, "time", return_value=1775622635), \
+                     mock.patch.object(cli.mail, "delete_temp_email") as delete_mock:
+                    cli._save_result(token_json, "secret-pass", None)
+
+                cpa_path = os.path.join(temp_dir, "token_user_example.com_1775622635.json")
+                sub_path = os.path.join(temp_dir, "sub_user_example.com_1775622635.json")
+                accounts_path = os.path.join(temp_dir, "accounts.txt")
+
+                self.assertTrue(os.path.exists(cpa_path))
+                self.assertTrue(os.path.exists(sub_path))
+                self.assertTrue(os.path.exists(accounts_path))
+
+                with open(sub_path, "r", encoding="utf-8") as handle:
+                    sub_data = json.load(handle)
+
+                self.assertEqual(len(sub_data["accounts"]), 1)
+                self.assertEqual(sub_data["accounts"][0]["name"], "user@example.com")
+                self.assertEqual(sub_data["accounts"][0]["extra"]["email"], "user@example.com")
+                self.assertEqual(
+                    sub_data["accounts"][0]["credentials"]["chatgpt_account_id"],
+                    "acc-001",
+                )
+                delete_mock.assert_called_once_with("user@example.com", proxies=None)
+            finally:
+                ctx.TOKEN_OUTPUT_DIR = original_output_dir
+                ctx.CLI_PROXY_AUTHS_DIR = original_proxy_auths_dir
 
 
 if __name__ == "__main__":
