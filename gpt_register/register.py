@@ -251,6 +251,33 @@ def run(proxy: Optional[str]) -> tuple:
             print(f"[*] 验证码校验状态: {code_resp.status_code}")
             if code_resp.status_code != 200:
                 print(code_resp.text)
+            else:
+                try:
+                    otp_json = code_resp.json()
+                    otp_continue = str(otp_json.get("continue_url") or "").strip()
+                    otp_page = str((otp_json.get("page") or {}).get("type") or "").strip()
+                    print(f"[*] OTP 校验响应 continue_url: {otp_continue}")
+                    print(f"[*] OTP 校验响应 page.type: {otp_page}")
+                    if otp_continue:
+                        if not otp_continue.startswith("http"):
+                            otp_continue = f"https://auth.openai.com{otp_continue}"
+                        otp_next_resp = oauth._post_with_retry(
+                            s,
+                            otp_continue,
+                            headers={
+                                "referer": "https://auth.openai.com/email-verification",
+                                "accept": "application/json",
+                                "content-type": "application/json",
+                                "openai-sentinel-token": sentinel,
+                            },
+                            json_body={},
+                            proxies=proxies,
+                            timeout=15,
+                            retries=1,
+                        )
+                        print(f"[*] OTP 后续步骤状态: {otp_next_resp.status_code}")
+                except Exception as e:
+                    print(f"[*] OTP 响应解析异常(非致命): {e}")
         else:
             print("[*] 密码注册无需邮箱验证，跳过 OTP 步骤")
 
